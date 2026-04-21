@@ -114,10 +114,6 @@ _CITY_NAME_PATTERNS: dict[str, tuple[str, ...]] = {
 }
 
 
-def build_one_day_plan(query: str, places: List[dict], strict_mode: bool = False) -> str:
-    return build_trip_plan_payload(query=query, places=places, strict_mode=strict_mode)["plan"]
-
-
 def build_trip_plan_payload(query: str, places: List[dict], strict_mode: bool = False) -> dict:
     if not places:
         return {
@@ -388,67 +384,6 @@ def _rank_attractions(places: List[dict], query: str = "") -> List[dict]:
     return sorted(places, key=lambda p: (_attraction_fame_score(p, query=query), _place_key(p)), reverse=True)
 
 
-def _pick_next_attraction(pool: List[dict], city: str, used: set[str], query: str = "") -> dict | None:
-    for _ in range(25):
-        candidates = [
-            p
-            for p in pool
-            if _place_key(p)
-            and _place_key(p) not in used
-            and _is_quality_attraction_name(str(p.get("name") or ""))
-        ]
-        if candidates:
-            return _random_pick_from_ranked(candidates, window=10)
-        # DB-only mode: do not call external attractions.
-        return None
-    return None
-
-
-def _pick_next_attraction_by_style(
-    pool: List[dict],
-    used: set[str],
-    style: str,
-    query: str = "",
-) -> dict | None:
-    preferred = [
-        p
-        for p in pool
-        if _place_key(p)
-        and _place_key(p) not in used
-        and _is_quality_attraction_name(str(p.get("name") or ""))
-        and _attraction_style(p) == style
-    ]
-    if preferred:
-        return _random_pick_from_ranked(preferred, window=10)
-    # Fallback to any attraction if one style is scarce in DB.
-    return _pick_next_attraction(pool=pool, city="", used=used, query=query)
-
-
-def _pick_next_attraction_same_area(
-    pool: List[dict],
-    used: set[str],
-    style: str,
-    anchor: dict,
-    query: str = "",
-) -> dict | None:
-    anchor_areas = _extract_admin_areas(anchor)
-    if not anchor_areas:
-        return None
-    candidates = [
-        p
-        for p in pool
-        if _place_key(p)
-        and _place_key(p) not in used
-        and _is_quality_attraction_name(str(p.get("name") or ""))
-        and _attraction_style(p) == style
-        and _place_city_key(p) == _place_city_key(anchor)
-        and bool(_extract_admin_areas(p).intersection(anchor_areas))
-    ]
-    if not candidates:
-        return None
-    return _random_pick_from_ranked(candidates, window=8)
-
-
 def _pick_daily_tourism_entertainment_pair(
     pool: List[dict],
     used: set[str],
@@ -572,14 +507,6 @@ def _area_alignment_score(candidate: dict, anchor: dict | None) -> float:
     if a_pt and c_pt:
         score -= _haversine_km(a_pt[0], a_pt[1], c_pt[0], c_pt[1]) * 0.45
     return score
-
-
-def _share_admin_area(a: dict | None, b: dict | None) -> bool:
-    if not a or not b:
-        return False
-    if _place_city_key(a) != _place_city_key(b):
-        return False
-    return bool(_extract_admin_areas(a).intersection(_extract_admin_areas(b)))
 
 
 def _attraction_style(p: dict) -> str:
@@ -914,11 +841,6 @@ def _extract_admin_areas(p: dict) -> set[str]:
         "thang binh",
     )
     return {k for k in known if k in s}
-
-
-def _target_city_key(query: str, fallback_city: str = "") -> str:
-    keys = _target_city_keys(query, fallback_city)
-    return keys[0] if keys else ""
 
 
 def _target_city_keys(query: str, fallback_city: str = "") -> List[str]:
@@ -2172,19 +2094,15 @@ def _fmt(p: dict | None) -> str:
         return "—"
     name = str(p.get("name") or "").strip()
     address = str(p.get("address") or "").strip()
-    source = str(p.get("source") or "").strip()
-    pick_reason = str(p.get("selection_reason") or "").strip()
     map_url = (
         str(p.get("map_place_uri") or "").strip()
         or str(p.get("google_maps_uri") or "").strip()
         or _map_url(p.get("lat"), p.get("lon"))
     )
-    src_bit = f" — Nguon: {source}" if source else ""
-    pick_bit = f" — Ly do chon: {pick_reason}" if pick_reason else ""
     map_bit = f" — Map: {map_url}" if map_url else ""
     if address:
-        return f"{name} ({address}){src_bit}{pick_bit}{map_bit}"
-    return f"{name}{src_bit}{pick_bit}{map_bit}".strip() or "—"
+        return f"{name} ({address}){map_bit}"
+    return f"{name}{map_bit}".strip() or "—"
 
 
 def _with_pick_reason(p: dict | None, reason: str) -> dict | None:
@@ -2395,10 +2313,7 @@ def _travel_note(a: dict | None, b: dict | None) -> str:
         if exact_same_point:
             shown_km = 0.0
         recommended_mode = "di bo hoac Grab" if shown_km <= 1.0 else "Grab hoac oto"
-        base = (
-            f"~{shown_km:.1f} km, {max(3, int(fastest['eta_min']))} phut, "
-            f"nen di {recommended_mode} (nguon map: {fastest['source']})."
-        )
+        base = f"~{shown_km:.1f} km, {max(3, int(fastest['eta_min']))} phut, nen di {recommended_mode}."
         return f"{base} Link chặng: {segment_map}" if segment_map else base
     km = _haversine_km(a_lat, a_lon, b_lat, b_lon)
     eta_min = max(5, int(round(km / 28 * 60)))

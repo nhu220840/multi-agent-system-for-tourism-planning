@@ -12,8 +12,10 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from app.config.settings import get_settings
+from app.core.database import init_db
 from app.services.external_place_store import load_external_places
-from app.services.place_metadata import enrich_place_record
+from app.services.place_metadata import enrich_place_record, normalize_address_text
+from app.services.place_repository import upsert_places
 from app.tools.google_places_tool import GooglePlaceResolution, google_places_available, resolve_place_record
 
 RAW_DIR = ROOT / "data" / "crawl" / "processed"
@@ -34,6 +36,7 @@ RAW_SOURCES = (
 
 def main() -> None:
     OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+    init_db()
     settings = get_settings()
     use_places_enrichment = bool(
         (settings.places_resolver_enabled or settings.google_places_enrich_enabled)
@@ -54,6 +57,8 @@ def main() -> None:
     )
     print(f"Wrote {len(rows)} normalized places to {OUTPUT_JSON}")
     print(f"Wrote {len(rows)} normalized places to {OUTPUT_JSONL}")
+    inserted = upsert_places(rows)
+    print(f"Upserted {inserted} places into PostgreSQL")
     if use_places_enrichment:
         CACHE_DIR.mkdir(parents=True, exist_ok=True)
         PLACES_CACHE_JSON.write_text(
@@ -146,6 +151,9 @@ def _prepare_row(
     prepared["category"] = str(prepared.get("category") or default_category)
     prepared["source"] = str(prepared.get("source") or default_source)
     prepared.setdefault("source_file", default_source)
+    for field in ("address", "formatted_address", "map_formatted_address", "google_formatted_address"):
+        if field in prepared:
+            prepared[field] = normalize_address_text(str(prepared.get(field) or ""))
     prepared["lat"] = _coerce_float(prepared.get("lat"))
     prepared["lon"] = _coerce_float(prepared.get("lon"))
     return prepared

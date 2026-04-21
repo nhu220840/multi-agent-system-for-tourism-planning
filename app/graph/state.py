@@ -15,6 +15,10 @@ class TravelGraphState(TypedDict):
     missing_fields: NotRequired[list[str]]
     follow_up_questions: NotRequired[list[str]]
     rag_query: NotRequired[str]
+    planning_query: NotRequired[str]
+    retry_query: NotRequired[str | None]
+    needs_replan: NotRequired[bool]
+    timings: NotRequired[dict[str, Any]]
 
     places: NotRequired[list[dict[str, Any]]]
     local_candidates_considered: NotRequired[int]
@@ -27,6 +31,7 @@ class TravelGraphState(TypedDict):
     research: NotRequired[str | None]
     plan: NotRequired[str | None]
     stay_plan: NotRequired[dict[str, Any] | None]
+    stay_recommendations: NotRequired[list[dict[str, Any]] | None]
     plan_validation: NotRequired[dict[str, Any] | None]
     itinerary_retry_attempted: NotRequired[bool]
     answer: NotRequired[str]

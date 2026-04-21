@@ -10,57 +10,18 @@ _root = Path(__file__).resolve().parents[2]
 if str(_root) not in sys.path:
     sys.path.insert(0, str(_root))
 
-from elasticsearch import Elasticsearch
-
-from app.config.settings import get_settings
 from app.services.external_place_store import load_external_places
 from app.services.place_fit_scoring import add_fit_scores
 from app.services.place_metadata import enrich_places
+from app.services.place_repository import list_places
 from app.services.vector_rag import retrieve_place_candidates
 
-_es: Elasticsearch | None = None
-DEFAULT_INDEX = "danang_places"
 DEFAULT_CITIES = ["Đà Nẵng", "Quảng Nam"]
-_LOCAL_JSON_FILES = [
-    _root / "data" / "places" / "dest_danang.json",
-    _root / "data" / "places" / "rest_danang.json",
-]
 _PROCESSED_DEST_FILE = _root / "data" / "crawl" / "processed" / "dest_danang.json"
 _PROCESSED_VCGT_FILE = _root / "data" / "crawl" / "processed" / "vcgt_danang.csv"
 _PROCESSED_REST_FILE = _root / "data" / "crawl" / "processed" / "rest_danang.json"
 _PROCESSED_ACCOM_FILE = _root / "data" / "crawl" / "processed" / "cslt_danang.json"
 _UNIFIED_FILE = _root / "data" / "processed" / "unified_places.json"
-
-
-def _client() -> Elasticsearch:
-    global _es
-    if _es is None:
-        _es = Elasticsearch(get_settings().elasticsearch_url)
-    return _es
-
-def _build_query(query: str, category: str | None = None) -> dict:
-    bool_query = {
-        "must": [
-            {
-                "multi_match": {
-                    "query": query,
-                    "fields": ["name^3", "description", "list_snippet"],
-                }
-            }
-        ],
-        "filter": [
-            {"terms": {"city.keyword": DEFAULT_CITIES}},
-        ],
-    }
-
-    if category:
-        bool_query["filter"].append({"term": {"category.keyword": category}})
-
-    return {"bool": bool_query}
-
-
-def search_places(query: str, category: str | None = None, top_k: int = 5):
-    return search_places_scored(query=query, category=category, top_k=top_k)
 
 
 def search_processed_places(
@@ -114,115 +75,12 @@ def search_processed_places(
     return scored[:top_k]
 
 
-def search_places_scored(query: str, category: str | None = None, top_k: int = 8) -> list[dict]:
-    """Hits with ES _score and normalized relevance; connection errors -> []."""
-    if not query.strip():
-        return []
-    search_query = _build_query(query=query, category=category)
-    try:
-        res = _client().search(
-            index=DEFAULT_INDEX,
-            query=search_query,
-            size=top_k,
-        )
-    except Exception:
-        return _search_local_json(query=query, category=category, top_k=top_k)
-
-    hits = res.get("hits", {}).get("hits") or []
-    if not hits:
-        return _search_local_json(query=query, category=category, top_k=top_k)
-
-    scores = [float(h.get("_score") or 0.0) for h in hits]
-    max_score = max(scores) if scores else 0.0
-    out: list[dict] = []
-    for h in hits:
-        src = h.get("_source") or {}
-        es_score = float(h.get("_score") or 0.0)
-        rel = (es_score / max_score) if max_score > 0 else 0.0
-        out.append(
-            {
-                "name": src.get("name"),
-                "category": src.get("category"),
-                "description": src.get("description") or "",
-                "address": src.get("address") or "",
-                "city": src.get("city") or "",
-                "list_snippet": src.get("list_snippet") or "",
-                "lat": src.get("lat"),
-                "lon": src.get("lon"),
-                "detail_content": src.get("detail_content") or "",
-                "detail_url": src.get("detail_url") or "",
-                "item_id": src.get("item_id") or "",
-                "source_category_code": src.get("source_category_code") or "",
-                "intent_tags": src.get("intent_tags") or [],
-                "planner_role": src.get("planner_role") or "",
-                "primary_area_key": src.get("primary_area_key") or "",
-                "admin_area_keys": src.get("admin_area_keys") or [],
-                "city_key": src.get("city_key") or "",
-                "density_bucket": src.get("density_bucket") or "",
-                "verification_status": src.get("verification_status") or "",
-                "source": "elasticsearch-danang_places",
-                "elasticsearch_score": es_score,
-                "retrieval_relevance": round(rel, 4),
-            }
-        )
-    return out
-
-
-def _search_local_json(query: str, category: str | None = None, top_k: int = 8) -> list[dict]:
-    terms = [_fold_text(t) for t in query.split() if t.strip()]
-    if not terms:
-        return []
-    rows: list[dict] = []
-    for fp in _LOCAL_JSON_FILES:
-        try:
-            data = json.loads(fp.read_text(encoding="utf-8"))
-        except Exception:
-            continue
-        if not isinstance(data, list):
-            continue
-        for item in data:
-            if not isinstance(item, dict):
-                continue
-            city = str(item.get("city") or "")
-            if city and city not in DEFAULT_CITIES:
-                continue
-            cat = str(item.get("category") or "")
-            if category and cat.lower() != category.lower():
-                continue
-            blob = _fold_text(" ".join(
-                [
-                    str(item.get("name") or ""),
-                    str(item.get("description") or ""),
-                    str(item.get("list_snippet") or ""),
-                    str(item.get("address") or ""),
-                    city,
-                ]
-            ))
-            matches = sum(1 for t in terms if t in blob)
-            if matches <= 0:
-                continue
-            rel = matches / max(len(terms), 1)
-            rows.append(
-                {
-                    "name": item.get("name"),
-                    "category": item.get("category"),
-                    "description": item.get("description") or "",
-                    "address": item.get("address") or "",
-                    "city": item.get("city") or "",
-                    "list_snippet": item.get("list_snippet") or "",
-                    "lat": item.get("lat"),
-                    "lon": item.get("lon"),
-                    "source": f"local-json:{fp.name}",
-                    "elasticsearch_score": 0.0,
-                    "retrieval_relevance": round(min(1.0, rel), 4),
-                }
-            )
-    rows.sort(key=lambda x: float(x.get("retrieval_relevance") or 0), reverse=True)
-    return rows[:top_k]
-
-
 @lru_cache(maxsize=1)
 def _load_unified_catalog() -> list[dict]:
+    pg_rows = list_places()
+    if pg_rows:
+        return [dict(item) for item in pg_rows if isinstance(item, dict)]
+
     rows: list[dict] = []
     seen: set[str] = set()
     if _UNIFIED_FILE.exists():
@@ -564,6 +422,7 @@ def _search_processed_accommodation_json(terms: list[str], top_k: int) -> list[d
                 "name": item.get("name"),
                 "category": "accommodation",
                 "description": item.get("description") or "",
+                "detail_content": item.get("detail_content") or "",
                 "address": item.get("address") or "",
                 "district": item.get("district") or "",
                 "city": city,
@@ -576,6 +435,8 @@ def _search_processed_accommodation_json(terms: list[str], top_k: int) -> list[d
                 "phone": item.get("phone") or "",
                 "website": item.get("website") or "",
                 "star_rating": item.get("star_rating") or "",
+                "price_range": item.get("price_range") or "",
+                "num_rooms": item.get("num_rooms") or "",
                 "accommodation_type": item.get("accommodation_type") or "",
                 "listing_source_type": item.get("listing_source_type") or "",
                 "source": "local-processed:cslt_danang.json",

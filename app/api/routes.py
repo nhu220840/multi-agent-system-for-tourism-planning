@@ -1,12 +1,12 @@
 from fastapi import APIRouter
 
-from app.graph.build_graph import run_travel_graph
-from app.models.request import ChatRequest
-from app.models.response import ChatResponse
+from app.api.routes_chat import router as chat_router
+from app.api.routes_conversations import router as conversations_router
+from app.api.routes_plan import router as plan_router
+from app.api.routes_session import router as session_router
 
 router = APIRouter()
-
-
-@router.post("/chat", response_model=ChatResponse)
-def chat(request: ChatRequest) -> ChatResponse:
-    return run_travel_graph(request.message, top_k=5, with_plan=True)
+router.include_router(session_router, prefix="/session", tags=["session"])
+router.include_router(chat_router, prefix="/chat", tags=["chat"])
+router.include_router(conversations_router, prefix="/conversations", tags=["conversations"])
+router.include_router(plan_router, prefix="/plans", tags=["plans"])

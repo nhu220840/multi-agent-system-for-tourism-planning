@@ -79,7 +79,7 @@ def _extract_interests(folded: str) -> str:
         "bao_tang": ["bao tang", "museum", "trien lam"],
         "di_tich_lich_su": ["di tich", "lich su", "van hoa", "co kinh", "historic", "heritage"],
         "tam_linh": ["tam linh", "chua", "den", "pagoda", "linh ung"],
-        "mua_sam": ["mua sam", "shopping", "cho dem", "mall"],
+        "mua_sam": ["mua sam", "shopping", "cho dem", "mall", "mua"],
         "cafe_chill": ["cafe", "ca phe", "chill", "song ao"],
         "thien_nhien": ["thien nhien", "nui", "rung", "trekking", "leo nui", "doi"],
         "giai_tri_dem": ["bar", "pub", "nightlife", "di dem", "dem"],

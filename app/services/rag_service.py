@@ -822,64 +822,7 @@ def _parse_star_rating(value: object) -> float:
 
 
 def _attach_map_links(answer: str, verified_places: List[dict]) -> str:
-    if not verified_places:
-        return answer
-    shown = verified_places[:6]
-    lines = [answer.strip(), "", "Phan loai nguon dia diem:"]
-    local_names = [
-        str(p.get("name") or "").strip()
-        for p in shown
-        if str(p.get("retrieval_tier") or "") in {
-            "local_elasticsearch",
-            "local_processed",
-            "vector_rag",
-            "hybrid_vector_local",
-        }
-    ]
-    external_names = [
-        str(p.get("name") or "").strip()
-        for p in shown
-        if str(p.get("retrieval_tier") or "") not in {
-            "local_elasticsearch",
-            "local_processed",
-            "vector_rag",
-            "hybrid_vector_local",
-        }
-    ]
-    lines.append("- Co trong database noi bo:")
-    if local_names:
-        lines.extend([f"  - {n}" for n in local_names if n])
-    else:
-        lines.append("  - (khong co)")
-    lines.append("- Lay tu truy van ngoai (OSM/Nominatim):")
-    if external_names:
-        lines.extend([f"  - {n}" for n in external_names if n])
-    else:
-        lines.append("  - (khong can dung)")
-
-    lines.append("")
-    lines.append("Diem phu hop cua dia diem (0-100):")
-    for p in shown:
-        name = str(p.get("name") or "").strip()
-        score = p.get("customer_fit_score")
-        intent = p.get("intent_match_ratio")
-        relevance = p.get("retrieval_relevance_pct")
-        if not name:
-            continue
-        if isinstance(score, (int, float)):
-            detail = f"- {name}: {float(score):.1f}/100"
-            if isinstance(intent, (int, float)) and isinstance(relevance, (int, float)):
-                detail += f" (intent: {float(intent):.1f}%, retrieval: {float(relevance):.1f}%)"
-            lines.append(detail)
-
-    lines.append("")
-    lines.append("Map URL tung dia diem:")
-    for p in shown:
-        name = str(p.get("name") or "").strip()
-        url = str(p.get("map_url") or "").strip()
-        if name and url:
-            lines.append(f"- {name}: {url}")
-    return "\n".join([l for l in lines if l is not None]).strip()
+    return answer
 
 
 def _build_research_summary(query: str, places: List[dict], transport: List[str] | None) -> str:

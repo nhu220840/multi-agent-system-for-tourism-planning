@@ -5,6 +5,7 @@ from pydantic_settings import BaseSettings
 
 class Settings(BaseSettings):
     app_env: str = "dev"
+    frontend_origin: str = "http://localhost:3000"
     rag_chunk_size_words: int = 120
     rag_chunk_overlap_words: int = 24
     rag_context_chunks: int = 6
@@ -35,6 +36,10 @@ class Settings(BaseSettings):
     mytomtom_base_url: str = "https://api.tomtom.com"
     elasticsearch_url: str = "http://localhost:9200"
     database_url: str = "postgresql://postgres:postgres@localhost:5432/travel"
+    session_cookie_name: str = "app_session"
+    session_cookie_secure: bool = False
+    session_cookie_samesite: str = "lax"
+    session_cookie_max_age_seconds: int = 60 * 60 * 24 * 30
 
     class Config:
         env_file = ".env"

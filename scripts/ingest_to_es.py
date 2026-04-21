@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import json
 import sys
 from pathlib import Path
 
@@ -11,19 +10,22 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from app.config.settings import get_settings
+from app.core.database import init_db
+from app.services.place_repository import list_places
 
 INDEX_NAME = "danang_places"
-UNIFIED_JSON = ROOT / "data" / "processed" / "unified_places.json"
 
 
 def main() -> None:
-    if not UNIFIED_JSON.exists():
-        raise FileNotFoundError(
-            f"Missing {UNIFIED_JSON}. Run scripts/preprocess.py before ingesting."
+    init_db()
+    documents = list_places()
+    if not documents:
+        raise RuntimeError(
+            "No places found in PostgreSQL. Run scripts/preprocess.py before syncing Elasticsearch."
         )
     es = Elasticsearch(get_settings().elasticsearch_url)
     create_index(es)
-    ingest_file(es, UNIFIED_JSON)
+    ingest_documents(es, documents)
 
 
 def create_index(es: Elasticsearch) -> None:
@@ -63,18 +65,14 @@ def create_index(es: Elasticsearch) -> None:
     print("Created index:", INDEX_NAME)
 
 
-def ingest_file(es: Elasticsearch, filepath: Path) -> None:
-    data = json.loads(filepath.read_text(encoding="utf-8"))
-    if not isinstance(data, list):
-        raise ValueError(f"Expected a list of documents in {filepath}")
-
+def ingest_documents(es: Elasticsearch, data: list[dict]) -> None:
     for i, doc in enumerate(data):
         if not isinstance(doc, dict):
             continue
         doc_id = str(doc.get("place_id") or i)
         es.index(index=INDEX_NAME, id=doc_id, document=doc)
 
-    print(f"Ingested {len(data)} docs from {filepath}")
+    print(f"Synced {len(data)} PostgreSQL places into Elasticsearch index {INDEX_NAME}")
 
 
 if __name__ == "__main__":

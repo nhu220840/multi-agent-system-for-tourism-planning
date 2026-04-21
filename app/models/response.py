@@ -3,8 +3,18 @@ from typing import Any
 from pydantic import BaseModel, Field
 
 
+class DebugStep(BaseModel):
+    key: str
+    title: str
+    status: str
+    summary: str
+    details: dict[str, Any] = Field(default_factory=dict)
+
+
 class ChatResponse(BaseModel):
     answer: str
+    conversation_id: str | None = None
+    plan_id: str | None = None
     conversation_stage: str = "planning"
     collected_info: dict[str, Any] | None = None
     missing_fields: list[str] | None = None
@@ -13,6 +23,7 @@ class ChatResponse(BaseModel):
     sources: list[dict[str, Any]] = Field(default_factory=list)
     plan: str | None = None
     stay_plan: dict[str, Any] | None = None
+    stay_recommendations: list[dict[str, Any]] | None = None
     plan_validation: dict[str, Any] | None = None
     research: str | None = None
     coordinator_plan: str | None = None
@@ -23,3 +34,4 @@ class ChatResponse(BaseModel):
     verified_places: list[dict[str, Any]] | None = None
     route_plan: list[dict[str, Any]] | None = None
     grounding: dict[str, Any] | None = None
+    debug_steps: list[DebugStep] = Field(default_factory=list)

@@ -167,6 +167,12 @@ def _coerce_float(value: Any) -> float | None:
 
 def _clear_runtime_caches() -> None:
     try:
+        from app.services.place_repository import clear_place_caches
+
+        clear_place_caches()
+    except Exception:
+        pass
+    try:
         from app.tools.elasticsearch_tool import _load_unified_catalog
 
         _load_unified_catalog.cache_clear()

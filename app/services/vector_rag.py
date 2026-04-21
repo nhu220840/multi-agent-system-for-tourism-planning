@@ -10,6 +10,7 @@ from typing import Any, Iterable
 
 from app.config.settings import get_settings
 from app.services.external_place_store import load_external_places
+from app.services.place_repository import list_place_chunks, load_places_lookup
 from app.services.place_metadata import enrich_place_record, fold_text
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -489,6 +490,9 @@ def _filter_documents(
 
 @lru_cache(maxsize=1)
 def _load_rag_documents() -> list[dict[str, Any]]:
+    db_docs = list_place_chunks()
+    if db_docs:
+        return [dict(item) for item in db_docs if isinstance(item, dict)]
     if not RAG_JSON.exists():
         return []
     try:
@@ -502,6 +506,9 @@ def _load_rag_documents() -> list[dict[str, Any]]:
 
 @lru_cache(maxsize=1)
 def _load_unified_places_by_id() -> dict[str, dict[str, Any]]:
+    db_lookup = load_places_lookup()
+    if db_lookup:
+        return {key: dict(value) for key, value in db_lookup.items()}
     out: dict[str, dict[str, Any]] = {}
     payload: list[dict[str, Any]] = []
     if UNIFIED_JSON.exists():

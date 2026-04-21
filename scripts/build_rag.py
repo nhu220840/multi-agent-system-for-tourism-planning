@@ -10,8 +10,10 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from app.config.settings import get_settings
+from app.core.database import init_db
 from app.services.external_place_store import load_external_places
 from app.services.place_metadata import enrich_place_record
+from app.services.place_repository import list_places, replace_place_chunks
 from app.services.vector_rag import attach_embeddings, build_chunk_documents
 
 UNIFIED_JSON = ROOT / "data" / "processed" / "unified_places.json"
@@ -22,6 +24,7 @@ RAG_JSONL = RAG_DIR / "rag_documents.jsonl"
 
 def main() -> None:
     RAG_DIR.mkdir(parents=True, exist_ok=True)
+    init_db()
     settings = get_settings()
     places = _load_places()
     documents = build_chunk_documents(places)
@@ -31,11 +34,13 @@ def main() -> None:
         "\n".join(json.dumps(doc, ensure_ascii=False) for doc in documents),
         encoding="utf-8",
     )
+    replace_place_chunks(documents)
     with_embeddings = sum(
         1 for doc in documents if isinstance(doc.get("embedding"), list) and doc.get("embedding")
     )
     print(f"Wrote {len(documents)} chunked RAG documents to {RAG_JSON}")
     print(f"Wrote {len(documents)} chunked RAG documents to {RAG_JSONL}")
+    print(f"Synced {len(documents)} chunked RAG documents into PostgreSQL")
     if with_embeddings:
         print(f"Embedded {with_embeddings}/{len(documents)} chunks with model: {embedding_model}")
     else:
@@ -47,6 +52,9 @@ def main() -> None:
 
 
 def _load_places() -> list[dict[str, Any]]:
+    pg_places = list_places()
+    if pg_places:
+        return [dict(item) for item in pg_places if isinstance(item, dict)]
     if not UNIFIED_JSON.exists():
         raise FileNotFoundError(
             f"Missing unified catalog at {UNIFIED_JSON}. Run scripts/preprocess.py first."

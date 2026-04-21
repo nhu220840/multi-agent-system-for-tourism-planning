@@ -67,6 +67,20 @@ def fold_text(text: str) -> str:
     return re.sub(r"\s+", " ", no_marks).strip().lower()
 
 
+def normalize_address_text(text: str) -> str:
+    value = re.sub(r"\s+", " ", str(text or "")).strip(" ,")
+    if not value:
+        return ""
+
+    parts = [part.strip(" ,") for part in value.split(",")]
+    parts = [part for part in parts if part]
+    normalized = ", ".join(parts)
+    normalized = re.sub(r"\(\s*,\s*", "(", normalized)
+    normalized = re.sub(r",\s*,+", ", ", normalized)
+    normalized = re.sub(r"\(\s*\)", "", normalized)
+    return normalized.strip(" ,")
+
+
 def city_key_from_text(text: str) -> str:
     folded = fold_text(text)
     if "hoi an" in folded:
@@ -130,6 +144,9 @@ def primary_admin_area_key(place: dict[str, Any]) -> str:
 
 def enrich_place_record(place: dict[str, Any]) -> dict[str, Any]:
     enriched = dict(place)
+    for field in ("address", "formatted_address", "map_formatted_address", "google_formatted_address"):
+        if field in enriched:
+            enriched[field] = normalize_address_text(str(enriched.get(field) or ""))
     area_keys = extract_admin_area_keys(enriched)
     planner_role = infer_planner_role(enriched)
     intent_tags = infer_intent_tags(enriched)
