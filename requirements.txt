@@ -14,8 +14,6 @@ pydantic-settings==2.1.0
 
 # Database
 psycopg2-binary==2.9.9
-
-# Search & Indexing
 elasticsearch==8.11.0
 
 # Environment Variables

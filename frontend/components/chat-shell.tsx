@@ -1,6 +1,6 @@
 "use client";
 
-import { FormEvent, ReactNode, useEffect, useState, useTransition } from "react";
+import { FormEvent, ReactNode, useEffect, useRef, useState } from "react";
 
 import {
   type ChatResponse,
@@ -25,6 +25,7 @@ type DraftMessage = {
 type AssistantMessageMetadata = Partial<ChatResponse> & {
   collected_info?: Record<string, unknown> | null;
   recommended_hotel?: Record<string, unknown> | null;
+  route_plan?: Record<string, unknown>[] | null;
 };
 
 type DaySlotSummary = {
@@ -47,18 +48,75 @@ type StayRecommendation = {
   mapUrl: string | null;
 };
 
+type RouteLeg = {
+  dayNumber: number | null;
+  sequence: number;
+  legLabel: string;
+  from: string;
+  to: string;
+  distanceKm: string;
+  etaMin: string;
+  modeLabel: string;
+  modeTone: "walk" | "ride" | "car" | "default";
+  modeBadge: string;
+  directionUrl: string | null;
+};
+
 type PlannerSnapshot = {
   destination: string;
   daysLabel: string;
   hotelName: string;
   hotelMapUrl: string | null;
   stayRecommendations: StayRecommendation[];
+  routeLegs: RouteLeg[];
   followUp: string | null;
   daySummaries: DaySummary[];
   hasPlan: boolean;
 };
 
+type ConversationListItem = {
+  key: string;
+  conversationId: string | null;
+  title: string;
+  created_at: string;
+  updated_at: string;
+  latest_message_preview?: string | null;
+  message_count: number;
+};
+
+type ConversationViewState = {
+  conversationId: string | null;
+  messages: DraftMessage[];
+  followUps: string[];
+  trace: string[];
+  debugSteps: DebugStep[];
+  pendingStartedAt: number | null;
+};
+
 const URL_PATTERN = /https?:\/\/[^\s]+/g;
+
+function createConversationViewState(conversationId: string | null = null): ConversationViewState {
+  return {
+    conversationId,
+    messages: [],
+    followUps: [],
+    trace: [],
+    debugSteps: [],
+    pendingStartedAt: null,
+  };
+}
+
+function toConversationListItem(summary: ConversationSummary): ConversationListItem {
+  return {
+    key: summary.id,
+    conversationId: summary.id,
+    title: summary.title,
+    created_at: summary.created_at,
+    updated_at: summary.updated_at,
+    latest_message_preview: summary.latest_message_preview,
+    message_count: summary.message_count,
+  };
+}
 
 function toDraftMessages(conversation: ConversationDetail | null): DraftMessage[] {
   if (!conversation) {
@@ -257,11 +315,6 @@ function readString(value: unknown): string {
   return typeof value === "string" ? value.trim() : "";
 }
 
-function extractFirstUrl(text: string): string | null {
-  const match = text.match(URL_PATTERN);
-  return match?.[0] || null;
-}
-
 function truncateMiddle(value: string, maxLength = 48): string {
   if (value.length <= maxLength) {
     return value;
@@ -281,6 +334,12 @@ function linkLabelForLine(url: string, line: string, index: number): string {
   if (lower.includes(" map:")) {
     return index > 0 ? `Mo map ${index + 1}` : "Mo map";
   }
+  if (url.includes("/routes/") && url.includes("maps.track-asia.com")) {
+    return "Chi duong";
+  }
+  if (url.includes("/place/") && url.includes("maps.track-asia.com")) {
+    return "Xem map";
+  }
   if (lower.includes("directions")) {
     return "Chi duong";
   }
@@ -288,6 +347,9 @@ function linkLabelForLine(url: string, line: string, index: number): string {
   try {
     const parsed = new URL(url);
     const host = parsed.hostname.replace(/^www\./, "");
+    if (host.includes("track-asia.com")) {
+      return url.includes("/routes/") ? "Chi duong" : "Xem map";
+    }
     if (host.includes("openstreetmap")) {
       return "OpenStreetMap";
     }
@@ -310,6 +372,18 @@ function cleanDisplayLine(line: string): string {
     return "";
   }
   if (/^[-•]?\s*ly do phu hop:/i.test(text)) {
+    return "";
+  }
+  if (/^(tom tat|thong tin) di chuyen:\s*$/i.test(text)) {
+    return "";
+  }
+  if (/^[-•]?\s*chang\s+\d+\s*:/i.test(text)) {
+    return "";
+  }
+  if (/^[-•]?\s*Link chặng:/i.test(text)) {
+    return "";
+  }
+  if (/^[-•]?\s*Nghi dem\s*:/i.test(text)) {
     return "";
   }
 
@@ -341,6 +415,13 @@ function splitActionClauses(text: string): string[] {
 function expandDisplayLine(line: string): string[] {
   const cleanedLine = cleanDisplayLine(line);
   if (!cleanedLine) {
+    return [""];
+  }
+
+  if (/^[-•]?\s*Link chặng:\s*https?:\/\/\S+$/i.test(cleanedLine)) {
+    return [""];
+  }
+  if (cleanedLine.includes("->") && /https?:\/\//i.test(cleanedLine) && !/\b(?:km|phut)\b/i.test(cleanedLine)) {
     return [""];
   }
 
@@ -612,6 +693,111 @@ function extractStayRecommendations(metadata: AssistantMessageMetadata): StayRec
     .filter((item): item is StayRecommendation => Boolean(item));
 }
 
+function formatDistanceLabel(value: unknown): string {
+  if (typeof value === "number" && Number.isFinite(value)) {
+    return `${value.toFixed(value >= 10 ? 0 : 1)} km`;
+  }
+  const text = readString(value);
+  if (!text) {
+    return "";
+  }
+  return text.toLowerCase().includes("km") ? text : `${text} km`;
+}
+
+function formatEtaLabel(value: unknown): string {
+  if (typeof value === "number" && Number.isFinite(value)) {
+    return `${Math.round(value)} phut`;
+  }
+  const text = readString(value);
+  if (!text) {
+    return "";
+  }
+  return /\bphut\b/i.test(text) ? text : `${text} phut`;
+}
+
+function parseDistanceKm(value: unknown): number | null {
+  if (typeof value === "number" && Number.isFinite(value)) {
+    return value;
+  }
+  const text = readString(value);
+  if (!text) {
+    return null;
+  }
+  const match = text.match(/-?\d+(?:\.\d+)?/);
+  if (!match) {
+    return null;
+  }
+  const parsed = Number(match[0]);
+  return Number.isFinite(parsed) ? parsed : null;
+}
+
+function extractRouteLegs(metadata: AssistantMessageMetadata): RouteLeg[] {
+  const raw = metadata.route_plan;
+  if (!Array.isArray(raw)) {
+    return [];
+  }
+
+  return raw
+    .map((item) => {
+      if (!item || typeof item !== "object") {
+        return null;
+      }
+      const record = item as Record<string, unknown>;
+      const from = readString(record.from);
+      const to = readString(record.to);
+      if (!from || !to) {
+        return null;
+      }
+      const rawDay = typeof record.day === "number" ? record.day : Number(readString(record.day) || NaN);
+      const dayNumber = Number.isFinite(rawDay) ? rawDay : null;
+      const modeLabel = readString(record.mode_label) || readString(record.recommended_mode);
+      const distanceKmValue = parseDistanceKm(record.distance_km);
+      const modeMeta = classifyRouteMode(modeLabel, distanceKmValue);
+      return {
+        dayNumber,
+        sequence:
+          typeof record.sequence === "number" && Number.isFinite(record.sequence) ? record.sequence : Number.MAX_SAFE_INTEGER,
+        legLabel: readString(record.leg_label) || "",
+        from,
+        to,
+        distanceKm: formatDistanceLabel(record.distance_km),
+        etaMin: formatEtaLabel(record.eta_min),
+        modeLabel,
+        modeTone: modeMeta.tone,
+        modeBadge: modeMeta.badge,
+        directionUrl: readString(record.segment_map_url) || null,
+      } satisfies RouteLeg;
+    })
+    .filter((item): item is RouteLeg => Boolean(item));
+}
+
+function classifyRouteMode(modeLabel: string, distanceKm: number | null): { tone: RouteLeg["modeTone"]; badge: string } {
+  if (distanceKm != null) {
+    if (distanceKm < 1) {
+      return { tone: "walk", badge: "Di bo" };
+    }
+    if (distanceKm < 4) {
+      return { tone: "ride", badge: "Xe may/Grab" };
+    }
+    return { tone: "car", badge: "Grab/oto" };
+  }
+
+  const lower = modeLabel.toLowerCase();
+  if (!lower) {
+    return { tone: "default", badge: "Route" };
+  }
+  if (lower.includes("di bo") || lower.includes("walking") || lower.includes("walk")) {
+    return { tone: "walk", badge: "Di bo" };
+  }
+  if (lower.includes("xe may") || lower.includes("motor") || lower.includes("moto") || lower.includes("scooter")) {
+    return { tone: "ride", badge: "Xe may" };
+  }
+  if (lower.includes("grab") || lower.includes("oto") || lower.includes("ô tô") || lower.includes("car")) {
+    return { tone: "car", badge: "Grab/oto" };
+  }
+  return { tone: "default", badge: modeLabel };
+}
+
 function extractDestinationFromAnswer(text: string): string {
   const match = text.match(/KE HOACH DU LICH GOI Y\s*-\s*(.+)/i);
   return match?.[1]?.trim() || "";
@@ -647,6 +833,7 @@ function buildPlannerSnapshot(message: DraftMessage | null): PlannerSnapshot | n
   const daySummaries = parsePlanDays(planText);
   const hotelInfo = extractHotelInfo(metadata);
   const stayRecommendations = extractStayRecommendations(metadata);
+  const routeLegs = extractRouteLegs(metadata);
   const followUp = Array.isArray(metadata.follow_up_questions)
     ? metadata.follow_up_questions.find((item) => typeof item === "string" && item.trim()) || null
     : null;
@@ -657,10 +844,20 @@ function buildPlannerSnapshot(message: DraftMessage | null): PlannerSnapshot | n
     hotelName: hotelInfo.hotelName,
     hotelMapUrl: hotelInfo.hotelMapUrl,
     stayRecommendations,
+    routeLegs,
     followUp,
     daySummaries,
     hasPlan: daySummaries.length > 0,
   };
+}
+
+function dayNumberFromTitle(title: string): number | null {
+  const match = title.match(/\bNgay\s+(\d+)\b/i);
+  if (!match) {
+    return null;
+  }
+  const parsed = Number(match[1]);
+  return Number.isFinite(parsed) ? parsed : null;
 }
 
 function getLatestAssistantMessage(messages: DraftMessage[]): DraftMessage | null {
@@ -789,40 +986,53 @@ function SummaryPanel({
 
 export function ChatShell() {
   const [principal, setPrincipal] = useState<Principal | null>(null);
-  const [conversations, setConversations] = useState<ConversationSummary[]>([]);
-  const [activeConversationId, setActiveConversationId] = useState<string | null>(null);
-  const [messages, setMessages] = useState<DraftMessage[]>([]);
+  const [serverConversations, setServerConversations] = useState<ConversationListItem[]>([]);
+  const [draftConversations, setDraftConversations] = useState<ConversationListItem[]>([]);
+  const [activeConversationKey, setActiveConversationKey] = useState<string | null>(null);
+  const [conversationStates, setConversationStates] = useState<Record<string, ConversationViewState>>({});
   const [draft, setDraft] = useState("");
-  const [followUps, setFollowUps] = useState<string[]>([]);
-  const [trace, setTrace] = useState<string[]>([]);
-  const [debugSteps, setDebugSteps] = useState<DebugStep[]>([]);
   const [status, setStatus] = useState("Connecting to FastAPI...");
   const [error, setError] = useState<string | null>(null);
-  const [pendingElapsedMs, setPendingElapsedMs] = useState(0);
-  const [isPending, startTransition] = useTransition();
+  const [clockMs, setClockMs] = useState(() => Date.now());
+  const activeConversationKeyRef = useRef<string | null>(null);
 
   useEffect(() => {
-    if (!isPending) {
-      setPendingElapsedMs(0);
+    activeConversationKeyRef.current = activeConversationKey;
+  }, [activeConversationKey]);
+
+  const conversationItems = [...draftConversations, ...serverConversations];
+  const activeConversationState = activeConversationKey
+    ? conversationStates[activeConversationKey] ?? createConversationViewState()
+    : createConversationViewState();
+  const messages = activeConversationState.messages;
+  const followUps = activeConversationState.followUps;
+  const trace = activeConversationState.trace;
+  const debugSteps = activeConversationState.debugSteps;
+  const activeIsPending = activeConversationState.pendingStartedAt != null;
+  const hasPendingConversations = Object.values(conversationStates).some((item) => item.pendingStartedAt != null);
+  const pendingElapsedMs =
+    activeConversationState.pendingStartedAt != null
+      ? Math.max(0, clockMs - activeConversationState.pendingStartedAt)
+      : 0;
+
+  useEffect(() => {
+    if (!hasPendingConversations) {
       return;
     }
 
-    const startedAt = Date.now();
-    setPendingElapsedMs(0);
-
     const timer = window.setInterval(() => {
-      setPendingElapsedMs(Date.now() - startedAt);
+      setClockMs(Date.now());
     }, 180);
 
     return () => {
       window.clearInterval(timer);
     };
-  }, [isPending]);
+  }, [hasPendingConversations]);
 
   useEffect(() => {
     let cancelled = false;
 
-    startTransition(async () => {
+    (async () => {
       try {
         const session = await initSession();
         const items = await listConversations();
@@ -831,7 +1041,7 @@ export function ChatShell() {
         }
 
         setPrincipal(session.principal);
-        setConversations(items);
+        setServerConversations(items.map(toConversationListItem));
         setStatus("Anonymous session ready");
 
         if (items.length > 0) {
@@ -839,12 +1049,19 @@ export function ChatShell() {
           if (cancelled) {
             return;
           }
-          setActiveConversationId(detail.id);
-          setMessages(toDraftMessages(detail));
+          setActiveConversationKey(detail.id);
           const signals = extractConversationSignals(detail);
-          setFollowUps(signals.followUps);
-          setTrace(signals.trace);
-          setDebugSteps(signals.debugSteps);
+          setConversationStates((current) => ({
+            ...current,
+            [detail.id]: {
+              conversationId: detail.id,
+              messages: toDraftMessages(detail),
+              followUps: signals.followUps,
+              trace: signals.trace,
+              debugSteps: signals.debugSteps,
+              pendingStartedAt: null,
+            },
+          }));
         }
       } catch (loadError) {
         if (cancelled) {
@@ -853,43 +1070,105 @@ export function ChatShell() {
         setError(loadError instanceof Error ? loadError.message : "Unable to reach the backend.");
         setStatus("FastAPI connection failed");
       }
-    });
+    })();
 
     return () => {
       cancelled = true;
     };
   }, []);
 
-  async function refreshConversations(targetConversationId?: string) {
-    const items = await listConversations();
-    setConversations(items);
+  function createDraftConversation() {
+    const now = new Date().toISOString();
+    const key = `draft-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+    const item: ConversationListItem = {
+      key,
+      conversationId: null,
+      title: "New conversation",
+      created_at: now,
+      updated_at: now,
+      latest_message_preview: null,
+      message_count: 0,
+    };
+    setDraftConversations((current) => [item, ...current]);
+    setConversationStates((current) => ({
+      ...current,
+      [key]: createConversationViewState(),
+    }));
+    return key;
+  }
 
-    const nextConversationId = targetConversationId || activeConversationId;
-    if (!nextConversationId) {
+  async function refreshServerConversations() {
+    const items = await listConversations();
+    setServerConversations(items.map(toConversationListItem));
+    return items;
+  }
+
+  async function loadConversationIntoState(key: string, conversationId: string) {
+    const detail = await getConversation(conversationId);
+    const signals = extractConversationSignals(detail);
+    setConversationStates((current) => ({
+      ...current,
+      [key]: {
+        conversationId: detail.id,
+        messages: toDraftMessages(detail),
+        followUps: signals.followUps,
+        trace: signals.trace,
+        debugSteps: signals.debugSteps,
+        pendingStartedAt: null,
+      },
+    }));
+    return detail;
+  }
+
+  function updateConversationItemPreview(key: string, content: string) {
+    const updatedAt = new Date().toISOString();
+    const preview = content.trim();
+    setDraftConversations((current) =>
+      current.map((item) =>
+        item.key === key
+          ? {
+              ...item,
+              title: item.title === "New conversation" ? truncateMiddle(preview, 42) : item.title,
+              updated_at: updatedAt,
+              latest_message_preview: preview,
+              message_count: item.message_count + 1,
+            }
+          : item,
+      ),
+    );
+    setServerConversations((current) =>
+      current.map((item) =>
+        item.key === key
+          ? {
+              ...item,
+              updated_at: updatedAt,
+              latest_message_preview: preview,
+              message_count: item.message_count + 1,
+            }
+          : item,
+      ),
+    );
+  }
+
+  async function handleConversationSelect(conversationKey: string) {
+    setError(null);
+    setStatus("Loading conversation...");
+    setActiveConversationKey(conversationKey);
+
+    const item = conversationItems.find((conversation) => conversation.key === conversationKey);
+    if (!item) {
+      setStatus("Conversation load failed");
       return;
     }
 
-    const detail = await getConversation(nextConversationId);
-    setActiveConversationId(detail.id);
-    setMessages(toDraftMessages(detail));
-    const signals = extractConversationSignals(detail);
-    setFollowUps(signals.followUps);
-    setTrace(signals.trace);
-    setDebugSteps(signals.debugSteps);
-  }
-
-  async function handleConversationSelect(conversationId: string) {
-    setError(null);
-    setStatus("Loading conversation...");
+    const localState = conversationStates[conversationKey];
+    if (localState?.messages.length || localState?.pendingStartedAt != null || !item.conversationId) {
+      setStatus("Conversation loaded");
+      return;
+    }
 
     try {
-      const detail = await getConversation(conversationId);
-      setActiveConversationId(detail.id);
-      setMessages(toDraftMessages(detail));
-      const signals = extractConversationSignals(detail);
-      setFollowUps(signals.followUps);
-      setTrace(signals.trace);
-      setDebugSteps(signals.debugSteps);
+      await loadConversationIntoState(conversationKey, item.conversationId);
       setStatus("Conversation loaded");
     } catch (loadError) {
       setError(loadError instanceof Error ? loadError.message : "Conversation load failed.");
@@ -900,7 +1179,17 @@ export function ChatShell() {
   async function handleSubmit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     const content = draft.trim();
-    if (!content || isPending) {
+    let conversationKey = activeConversationKey;
+    if (!content) {
+      return;
+    }
+    if (!conversationKey) {
+      conversationKey = createDraftConversation();
+      setActiveConversationKey(conversationKey);
+    }
+
+    const activeState = conversationStates[conversationKey] ?? createConversationViewState();
+    if (activeState.pendingStartedAt != null) {
       return;
     }
 
@@ -908,42 +1197,102 @@ export function ChatShell() {
     setError(null);
     setStatus("FastAPI is planning your trip...");
     setDraft("");
-    setFollowUps([]);
-    setTrace([]);
-    setDebugSteps([]);
-    setMessages((current) => [
+    setConversationStates((current) => ({
       ...current,
-      { id: optimisticId, role: "user", content },
-      { id: `${optimisticId}-assistant`, role: "assistant", content: "Thinking...", pending: true },
-    ]);
+      [conversationKey]: {
+        ...(current[conversationKey] ?? createConversationViewState(activeState.conversationId)),
+        conversationId: activeState.conversationId,
+        messages: [
+          ...((current[conversationKey]?.messages || activeState.messages) ?? []),
+          { id: optimisticId, role: "user", content },
+          { id: `${optimisticId}-assistant`, role: "assistant", content: "Thinking...", pending: true },
+        ],
+        followUps: [],
+        trace: [],
+        debugSteps: [],
+        pendingStartedAt: Date.now(),
+      },
+    }));
+    updateConversationItemPreview(conversationKey, content);
 
-    startTransition(async () => {
+    const requestConversationId = activeState.conversationId;
+
+    (async () => {
       try {
-        const response = await sendChat(content, activeConversationId || undefined);
-        const conversationId = response.conversation_id || activeConversationId || null;
+        const response = await sendChat(content, requestConversationId || undefined);
+        const resolvedConversationId = response.conversation_id || requestConversationId || null;
 
-        await refreshConversations(conversationId || undefined);
-        setFollowUps(response.follow_up_questions || []);
-        setTrace(normalizeTrace(response.trace));
-        setDebugSteps(response.debug_steps || []);
-        setStatus(response.conversation_stage === "intake" ? "Need a little more info" : "Plan ready");
+        await refreshServerConversations();
+
+        if (resolvedConversationId) {
+          const detail = await getConversation(resolvedConversationId);
+          const signals = extractConversationSignals(detail);
+          setConversationStates((current) => {
+            const nextKey = resolvedConversationId;
+            const nextState: ConversationViewState = {
+              conversationId: detail.id,
+              messages: toDraftMessages(detail),
+              followUps: signals.followUps,
+              trace: signals.trace,
+              debugSteps: signals.debugSteps,
+              pendingStartedAt: null,
+            };
+            if (conversationKey === nextKey) {
+              return {
+                ...current,
+                [nextKey]: nextState,
+              };
+            }
+            const updated = {
+              ...current,
+              [nextKey]: nextState,
+            };
+            delete updated[conversationKey];
+            return updated;
+          });
+          setDraftConversations((current) => current.filter((item) => item.key !== conversationKey));
+          setActiveConversationKey((current) => (current === conversationKey ? resolvedConversationId : current));
+        } else {
+          setConversationStates((current) => ({
+            ...current,
+            [conversationKey]: {
+              ...(current[conversationKey] ?? createConversationViewState()),
+              pendingStartedAt: null,
+              followUps: response.follow_up_questions || [],
+              trace: normalizeTrace(response.trace),
+              debugSteps: response.debug_steps || [],
+            },
+          }));
+        }
+
+        if (activeConversationKeyRef.current === conversationKey || activeConversationKeyRef.current === resolvedConversationId) {
+          setStatus(response.conversation_stage === "intake" ? "Need a little more info" : "Plan ready");
+        }
       } catch (submitError) {
-        setMessages((current) =>
-          current.filter((message) => message.id !== optimisticId && message.id !== `${optimisticId}-assistant`),
-        );
-        setError(submitError instanceof Error ? submitError.message : "Chat request failed.");
-        setTrace([]);
-        setDebugSteps([]);
-        setStatus("Chat request failed");
+        setConversationStates((current) => ({
+          ...current,
+          [conversationKey]: {
+            ...(current[conversationKey] ?? createConversationViewState(requestConversationId)),
+            conversationId: requestConversationId,
+            messages: (current[conversationKey]?.messages || []).filter(
+              (message) => message.id !== optimisticId && message.id !== `${optimisticId}-assistant`,
+            ),
+            pendingStartedAt: null,
+          },
+        }));
+        if (activeConversationKeyRef.current === conversationKey) {
+          setError(submitError instanceof Error ? submitError.message : "Chat request failed.");
+          setStatus("Chat request failed");
+        }
       }
-    });
+    })();
   }
 
-  const canShowEmptyState = !isPending && messages.length === 0;
+  const canShowEmptyState = !activeIsPending && messages.length === 0;
   const latestAssistantMessage = getLatestAssistantMessage(messages);
   const plannerSnapshot = buildPlannerSnapshot(latestAssistantMessage);
   const pendingSteps = buildPendingDebugSteps(pendingElapsedMs);
-  const traceSteps = isPending ? buildTraceSteps(pendingSteps) : buildTraceSteps(debugSteps);
+  const traceSteps = activeIsPending ? buildTraceSteps(pendingSteps) : buildTraceSteps(debugSteps);
 
   return (
     <main className="shell">
@@ -965,38 +1314,36 @@ export function ChatShell() {
         </div>
       </section>
 
-      <section className="workspace">
+        <section className="workspace">
         <aside className="sidebar">
           <div className="sidebar-header">
             <h2>Conversations</h2>
-            <span>{conversations.length}</span>
+            <span>{conversationItems.length}</span>
           </div>
 
           <button
             className="ghost-button"
             type="button"
             onClick={() => {
-              setActiveConversationId(null);
-              setMessages([]);
-              setFollowUps([]);
-              setTrace([]);
-              setDebugSteps([]);
+              const key = createDraftConversation();
+              setActiveConversationKey(key);
               setStatus("Fresh conversation");
+              setError(null);
             }}
           >
             Start new chat
           </button>
 
           <div className="conversation-list">
-            {conversations.length === 0 ? (
+            {conversationItems.length === 0 ? (
               <div className="empty-card">No saved conversations yet.</div>
             ) : (
-              conversations.map((conversation) => (
+              conversationItems.map((conversation) => (
                 <button
-                  key={conversation.id}
+                  key={conversation.key}
                   type="button"
-                  className={`conversation-item${conversation.id === activeConversationId ? " is-active" : ""}`}
-                  onClick={() => handleConversationSelect(conversation.id)}
+                  className={`conversation-item${conversation.key === activeConversationKey ? " is-active" : ""}`}
+                  onClick={() => handleConversationSelect(conversation.key)}
                 >
                   <span className="conversation-title">{conversation.title}</span>
                   <span className="conversation-meta">{formatRelativeLabel(conversation.updated_at)}</span>
@@ -1044,7 +1391,7 @@ export function ChatShell() {
                 <div className="trace-header">
                   <span>Thinking flow</span>
                   <span>
-                    {isPending
+                    {activeIsPending
                       ? `Running · ${formatElapsedMs(pendingElapsedMs)}`
                       : trace.length > 0
                         ? "Completed"
@@ -1057,7 +1404,7 @@ export function ChatShell() {
                       {index + 1}. {step.label}
                     </span>
                   ))}
-                  {!isPending && trace.length === 0 ? <span className="trace-empty">No orchestration trace yet.</span> : null}
+                  {!activeIsPending && trace.length === 0 ? <span className="trace-empty">No orchestration trace yet.</span> : null}
                 </div>
               </div>
 
@@ -1065,7 +1412,7 @@ export function ChatShell() {
                 <div className="trace-header">
                   <span>Step-by-step debug</span>
                   <span>
-                    {isPending
+                    {activeIsPending
                       ? `Tracking · ${formatElapsedMs(pendingElapsedMs)}`
                       : debugSteps.length > 0
                         ? `${debugSteps.length} steps`
@@ -1073,7 +1420,7 @@ export function ChatShell() {
                   </span>
                 </div>
                 <div className="debug-steps">
-                  {(isPending ? pendingSteps : debugSteps).map((step) => (
+                  {(activeIsPending ? pendingSteps : debugSteps).map((step) => (
                     <article key={step.key} className="debug-step">
                       <div className="debug-step-head">
                         <strong>{step.title}</strong>
@@ -1092,7 +1439,7 @@ export function ChatShell() {
                       ) : null}
                     </article>
                   ))}
-                  {!isPending && debugSteps.length === 0 ? (
+                  {!activeIsPending && debugSteps.length === 0 ? (
                     <span className="trace-empty">No debug steps available yet.</span>
                   ) : null}
                 </div>
@@ -1110,7 +1457,7 @@ export function ChatShell() {
               ) : null}
             </div>
 
-            <SummaryPanel snapshot={plannerSnapshot} followUps={followUps} isPending={isPending} />
+            <SummaryPanel snapshot={plannerSnapshot} followUps={followUps} isPending={activeIsPending} />
           </div>
 
           <form className="composer" onSubmit={handleSubmit}>
@@ -1127,8 +1474,8 @@ export function ChatShell() {
             />
             <div className="composer-actions">
               {error ? <span className="error-text">{error}</span> : <span className="hint-text">Session is cookie-backed.</span>}
-              <button className="submit-button" type="submit" disabled={isPending || !draft.trim()}>
-                {isPending ? "Planning..." : "Send to FastAPI"}
+              <button className="submit-button" type="submit" disabled={activeIsPending || !draft.trim()}>
+                {activeIsPending ? "Planning..." : "Send to FastAPI"}
               </button>
             </div>
           </form>

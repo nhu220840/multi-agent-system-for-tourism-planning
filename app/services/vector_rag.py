@@ -301,11 +301,6 @@ def _prepare_embedding_text(text: str, *, input_type: str, model_name: str) -> s
     return normalized
 
 
-def vector_index_available() -> bool:
-    docs = _load_rag_documents()
-    return any(isinstance(doc.get("embedding"), list) and doc.get("embedding") for doc in docs)
-
-
 def retrieve_place_candidates(
     query: str,
     *,

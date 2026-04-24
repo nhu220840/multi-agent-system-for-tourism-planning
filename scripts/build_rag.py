@@ -11,6 +11,7 @@ if str(ROOT) not in sys.path:
 
 from app.config.settings import get_settings
 from app.core.database import init_db
+from app.services.elasticsearch_sync import elasticsearch_status, sync_place_chunks_index
 from app.services.external_place_store import load_external_places
 from app.services.place_metadata import enrich_place_record
 from app.services.place_repository import list_places, replace_place_chunks
@@ -41,6 +42,13 @@ def main() -> None:
     print(f"Wrote {len(documents)} chunked RAG documents to {RAG_JSON}")
     print(f"Wrote {len(documents)} chunked RAG documents to {RAG_JSONL}")
     print(f"Synced {len(documents)} chunked RAG documents into PostgreSQL")
+    if settings.elasticsearch_sync_enabled:
+        es_status = elasticsearch_status()
+        if es_status.ok:
+            synced = sync_place_chunks_index(recreate=True, documents=documents)
+            print(f"Synced {synced} chunked RAG documents into Elasticsearch")
+        else:
+            print(f"Skipped Elasticsearch sync: {es_status.message}")
     if with_embeddings:
         print(f"Embedded {with_embeddings}/{len(documents)} chunks with model: {embedding_model}")
     else:

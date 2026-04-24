@@ -36,7 +36,7 @@ _TRACE_TITLE_MAP = {
     "planning_agent": "Planning Agent",
     "validator_agent": "Validator Agent",
     "response_service": "Response Service",
-    "local_elasticsearch": "Local Elasticsearch",
+    "elasticsearch_index": "Elasticsearch Index",
     "hybrid_vector_rag": "Hybrid Vector RAG",
     "db_only_local_sufficient": "Local Catalog Sufficient",
     "db_only_local_limited_results": "Local Catalog Limited",
@@ -141,6 +141,7 @@ def planning_node(state: TravelGraphState) -> dict[str, Any]:
     plan = None
     stay_plan = None
     coordinator_plan = None
+    route_plan = None
     itinerary_query = rag_query
 
     if _should_generate_plan(state):
@@ -161,6 +162,7 @@ def planning_node(state: TravelGraphState) -> dict[str, Any]:
         timings["planning_itinerary_ms"] = round((perf_counter() - step_started) * 1000, 1)
         plan = itinerary.get("plan")
         stay_plan = itinerary.get("stay_plan")
+        route_plan = itinerary.get("route_plan")
         recommended_hotel = itinerary.get("recommended_hotel") or recommended_hotel
         step_started = perf_counter()
         coordinator_plan = coordinator_tool(
@@ -207,7 +209,7 @@ def planning_node(state: TravelGraphState) -> dict[str, Any]:
         "coordinator_plan": coordinator_plan,
         "sources": source_artifacts.sources,
         "verified_places": source_artifacts.verified_places,
-        "route_plan": source_artifacts.route_plan,
+        "route_plan": route_plan or source_artifacts.route_plan,
         "grounding": source_artifacts.grounding,
         "retry_query": None,
         "needs_replan": False,

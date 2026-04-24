@@ -1,15 +1,21 @@
 from __future__ import annotations
 
 import re
-from math import asin, cos, radians, sin, sqrt
+from math import cos, radians, sqrt
 from random import SystemRandom
 from typing import List
-from urllib.parse import quote
 
+from app.services.route_utils import (
+    haversine_km as _shared_haversine_km,
+    place_map_url as _shared_place_map_url,
+    resolve_point_for_map as _shared_resolve_point_for_map,
+    resolve_segment_points as _shared_resolve_segment_points,
+    segment_map_url as _shared_segment_map_url,
+)
 from app.services.external_place_store import cache_external_places
 from app.services.place_metadata import fold_text as _fold
 from app.services.query_utils import extract_trip_days
-from app.tools.mytomtom_tool import GeoPoint, estimate_route
+from app.tools.trackasia_tool import GeoPoint, configured_route_modes, estimate_route
 from app.tools.nominatim_tool import search_places
 
 _RNG = SystemRandom()
@@ -112,6 +118,7 @@ _CITY_NAME_PATTERNS: dict[str, tuple[str, ...]] = {
     "hoi_an": ("hoi an",),
     "quang_nam": ("quang nam",),
 }
+_HOTEL_RELOCATION_THRESHOLD_KM = 30.0
 
 
 def build_trip_plan_payload(query: str, places: List[dict], strict_mode: bool = False) -> dict:
@@ -156,6 +163,7 @@ def build_trip_plan_payload(query: str, places: List[dict], strict_mode: bool = 
         f"LICH TRINH {total_days} NGAY TAI {destination_name}",
         "",
     ]
+    route_plan: List[dict] = []
 
     used_attraction_keys: set[str] = set()
     used_restaurant_keys: set[str] = set()
@@ -205,10 +213,10 @@ def build_trip_plan_payload(query: str, places: List[dict], strict_mode: bool = 
         city=city,
         strict_mode=strict_mode,
     )
-    hotel_by_day = {
-        int(day): segment.get("hotel")
-        for segment in stay_plan.get("segments", [])
-        for day in segment.get("days", [])
+    daily_stays = {
+        int(item.get("day")): item
+        for item in (stay_plan.get("daily") or [])
+        if isinstance(item, dict) and isinstance(item.get("day"), int)
     }
     if stay_plan.get("segments"):
         lines.extend(
@@ -226,13 +234,16 @@ def build_trip_plan_payload(query: str, places: List[dict], strict_mode: bool = 
         day = int(frame["day"])
         morning = frame.get("morning")
         afternoon = frame.get("afternoon")
-        hotel = hotel_by_day.get(day)
+        daily_stay = daily_stays.get(day) or {}
+        start_hotel = daily_stay.get("start_hotel")
+        end_hotel = daily_stay.get("end_hotel")
         day_city_label = _city_label_from_key(str(frame.get("city_key") or ""), default_city=city)
         breakfast, lunch, dinner = _select_daily_restaurants(
             food_places=food_places,
             city=day_city_label,
             anchors=[morning, afternoon],
-            hotel=hotel,
+            start_hotel=start_hotel,
+            end_hotel=end_hotel,
             used_restaurants=used_restaurant_keys,
             target_city_key=str(frame.get("city_key") or strict_target_city_key),
         )
@@ -241,18 +252,17 @@ def build_trip_plan_payload(query: str, places: List[dict], strict_mode: bool = 
             if k and "chua co" not in k:
                 used_restaurant_keys.add(k)
 
-        day_stops = [
-            hotel or breakfast,
-            breakfast,
-            morning,
-            lunch,
-            afternoon,
-            dinner,
-            hotel or dinner,
-        ]
-        day_route_url = _osm_directions_url(day_stops)
-        route_label = _route_sequence_label(day_stops)
-        leg_lines, leg_map_lines = _travel_leg_summaries(day_stops)
+        day_route_plan = _build_day_route_plan(
+            day=day,
+            start_hotel=start_hotel,
+            end_hotel=end_hotel,
+            breakfast=breakfast,
+            morning=morning,
+            lunch=lunch,
+            afternoon=afternoon,
+            dinner=dinner,
+        )
+        route_plan.extend(day_route_plan)
         day_theme = _day_theme_label(day=day, total_days=total_days, morning=morning, afternoon=afternoon)
         morning_action = _slot_action_text(slot="morning", place=morning, day=day)
         afternoon_action = _slot_action_text(slot="afternoon", place=afternoon, day=day)
@@ -266,20 +276,6 @@ def build_trip_plan_payload(query: str, places: List[dict], strict_mode: bool = 
                 f"• Trua: An trua tai {_fmt(lunch)}",
                 f"• Chieu: Hanh dong: {afternoon_action} tai {_fmt(afternoon)}",
                 f"• Toi: An toi tai {_fmt(dinner)}. Hanh dong: {evening_action}; di dao/chill quanh khu vuc {_fmt(dinner)}",
-                (f"• Ban do tuyen ngay: {day_route_url}" if day_route_url else ""),
-                (f"• Thu tu diem: {route_label}" if route_label else ""),
-                "",
-                "Thong tin di chuyen:",
-                *leg_lines,
-                "Map tung chang:",
-                *leg_map_lines,
-                "",
-                "Tom tat di chuyen:",
-                f"• Chang 1: {_travel_note(hotel or breakfast, morning)}",
-                f"• Chang 2: {_travel_note(morning, lunch)}",
-                f"• Chang 3: {_travel_note(lunch, afternoon)}",
-                f"• Chang 4: {_travel_note(afternoon, dinner)}",
-                f"• Nghi dem: {_fmt(hotel) if hotel else 'Tu chon cho nghi gan trung tam'}",
             ]
         )
 
@@ -294,6 +290,7 @@ def build_trip_plan_payload(query: str, places: List[dict], strict_mode: bool = 
         "plan": "\n".join(lines).strip(),
         "stay_plan": stay_plan,
         "recommended_hotel": _recommended_hotel_from_stay_plan(stay_plan),
+        "route_plan": route_plan,
     }
 
 
@@ -1003,40 +1000,133 @@ def _select_stay_plan(
     strict_mode: bool = False,
 ) -> dict:
     if not daily_frames:
-        return {"segments": [], "change_hotel": False}
+        return {"segments": [], "daily": [], "change_hotel": False}
+
+    full_segment = {
+        "city_key": "",
+        "days": [int(frame["day"]) for frame in daily_frames],
+        "anchors": [
+            anchor
+            for frame in daily_frames
+            for anchor in (frame.get("morning"), frame.get("afternoon"))
+            if anchor
+        ],
+    }
+    main_hotel = _select_segment_hotel(
+        segment=full_segment,
+        hotels=hotels,
+        city=city,
+        strict_mode=strict_mode,
+    )
+
+    daily: List[dict] = []
+    current_end_hotel = main_hotel
+    relocation_happened = False
+
+    for frame in daily_frames:
+        day = int(frame["day"])
+        city_key = str(frame.get("city_key") or "")
+        anchors = [frame.get("morning"), frame.get("afternoon")]
+        start_hotel = current_end_hotel or main_hotel
+        needs_relocation = _should_relocate_for_day(start_hotel=start_hotel, anchors=anchors)
+        end_hotel = start_hotel
+        reason = "main_base"
+
+        if needs_relocation:
+            candidate_hotel = _select_segment_hotel(
+                segment={
+                    "city_key": city_key,
+                    "days": [day],
+                    "anchors": [anchor for anchor in anchors if anchor],
+                },
+                hotels=hotels,
+                city=city,
+                strict_mode=strict_mode,
+            )
+            if candidate_hotel and not _same_hotel(candidate_hotel, start_hotel):
+                end_hotel = candidate_hotel
+                reason = "relocated_near_far_cluster"
+                relocation_happened = True
+
+        daily.append(
+            {
+                "day": day,
+                "city_key": city_key,
+                "start_hotel": start_hotel,
+                "end_hotel": end_hotel,
+                "reason": reason,
+            }
+        )
+        current_end_hotel = end_hotel or current_end_hotel
+
+    if relocation_happened and daily and main_hotel:
+        daily[-1]["end_hotel"] = main_hotel
+        daily[-1]["reason"] = "return_to_main_hotel"
 
     segments: List[dict] = []
-    for frame in daily_frames:
-        city_key = str(frame.get("city_key") or "")
-        if not segments or str(segments[-1].get("city_key") or "") != city_key:
+    for item in daily:
+        day = int(item["day"])
+        hotel = item.get("end_hotel")
+        city_key = str(item.get("city_key") or "")
+        if not hotel:
+            continue
+        if not segments or not _same_hotel(segments[-1].get("hotel"), hotel):
             segments.append(
                 {
                     "city_key": city_key,
-                    "days": [int(frame["day"])],
-                    "anchors": [frame.get("morning"), frame.get("afternoon")],
+                    "days": [day],
+                    "hotel": hotel,
+                    "reason": str(item.get("reason") or ""),
                 }
             )
         else:
-            segments[-1]["days"].append(int(frame["day"]))
-            segments[-1]["anchors"].extend([frame.get("morning"), frame.get("afternoon")])
+            segments[-1]["days"].append(day)
 
     for segment in segments:
-        hotel = _select_segment_hotel(
-            segment=segment,
-            hotels=hotels,
-            city=city,
-            strict_mode=strict_mode,
-        )
-        segment["hotel"] = hotel
-        segment["reason"] = str((hotel or {}).get("selection_reason") or "")
         segment["city_label"] = _city_label_from_key(str(segment.get("city_key") or ""), default_city=city)
         segment["days_label"] = _days_label(segment.get("days", []))
-        segment.pop("anchors", None)
 
     return {
         "segments": segments,
-        "change_hotel": len(segments) > 1,
+        "daily": daily,
+        "main_hotel": main_hotel,
+        "change_hotel": any(
+            not _same_hotel(item.get("start_hotel"), item.get("end_hotel"))
+            for item in daily
+        ),
     }
+
+
+def _should_relocate_for_day(
+    *,
+    start_hotel: dict | None,
+    anchors: List[dict | None],
+) -> bool:
+    if not start_hotel:
+        return False
+    distances = _hotel_to_anchor_distances_km(start_hotel, anchors)
+    if not distances:
+        return False
+    return min(distances) > _HOTEL_RELOCATION_THRESHOLD_KM
+
+
+def _hotel_to_anchor_distances_km(hotel: dict | None, anchors: List[dict | None]) -> List[float]:
+    hotel_pt = _resolve_point_for_map(hotel)
+    if not hotel_pt:
+        return []
+    distances: List[float] = []
+    for anchor in anchors:
+        anchor_pt = _resolve_point_for_map(anchor)
+        if not anchor_pt:
+            continue
+        distances.append(_haversine_km(hotel_pt[0], hotel_pt[1], anchor_pt[0], anchor_pt[1]))
+    return distances
+
+
+def _same_hotel(a: dict | None, b: dict | None) -> bool:
+    a_name = _fold(str((a or {}).get("name") or ""))
+    b_name = _fold(str((b or {}).get("name") or ""))
+    return bool(a_name and b_name and a_name == b_name)
 
 
 def _select_segment_hotel(
@@ -1283,7 +1373,7 @@ def _recommended_hotel_from_stay_plan(stay_plan: dict) -> dict | None:
         return hotel or None
     return {
         "type": "multi_city_stay",
-        "reason": "Doi khach san theo tung cum ngay/thanh pho de toi uu di chuyen.",
+        "reason": "Doi khach san theo tung cum ngay xa hon 30km de toi uu di chuyen, sau do quay ve khach san chinh.",
         "segments": [
             {
                 "days": segment.get("days", []),
@@ -1301,7 +1391,8 @@ def _select_daily_restaurants(
     food_places: List[dict],
     city: str,
     anchors: List[dict | None],
-    hotel: dict | None,
+    start_hotel: dict | None,
+    end_hotel: dict | None,
     used_restaurants: set[str],
     target_city_key: str = "",
 ) -> tuple[dict | None, dict | None, dict | None]:
@@ -1312,9 +1403,9 @@ def _select_daily_restaurants(
     afternoon_anchor = anchors[1] if len(anchors) > 1 else None
     meal_anchor_map = {"breakfast": morning_anchor, "lunch": morning_anchor, "dinner": afternoon_anchor or morning_anchor}
     meal_route_map: dict[str, tuple[dict | None, dict | None]] = {
-        "breakfast": (hotel, morning_anchor),
+        "breakfast": (start_hotel, morning_anchor),
         "lunch": (morning_anchor, afternoon_anchor),
-        "dinner": (afternoon_anchor, hotel),
+        "dinner": (afternoon_anchor, end_hotel),
     }
     all_pool: List[dict] = _unique_by_name(food_places)
     local_pool: List[dict] = [p for p in all_pool if _place_key(p) not in forbid]
@@ -2207,166 +2298,146 @@ def _slot_action_text(slot: str, place: dict | None, day: int) -> str:
 
 
 def _map_url(lat: object, lon: object) -> str:
-    if not isinstance(lat, (int, float)) or not isinstance(lon, (int, float)):
-        return ""
-    return (
-        f"https://www.openstreetmap.org/?mlat={float(lat):.6f}&mlon={float(lon):.6f}"
-        f"#map=16/{float(lat):.6f}/{float(lon):.6f}"
-    )
-
-
-def _osm_directions_url(stops: List[dict | None], engine: str = "fossgis_osrm_car") -> str:
-    points: List[tuple[float, float]] = []
-    for s in stops:
-        if not s:
-            continue
-        pt = _resolve_point_for_map(s)
-        if not pt:
-            continue
-        # Avoid consecutive duplicates (hotel==breakfast, dinner==hotel...)
-        if not points or pt != points[-1]:
-            points.append(pt)
-    # need at least 2 points to draw a route
-    if len(points) < 2:
-        return ""
-    route = ";".join([f"{lat:.6f},{lon:.6f}" for lat, lon in points])
-    return (
-        "https://www.openstreetmap.org/directions"
-        f"?engine={quote(engine, safe='')}&route={quote(route, safe=';,')}"
-    )
+    return _shared_place_map_url({"lat": lat, "lon": lon})
 
 
 def _segment_map_url(a: dict | None, b: dict | None, engine: str = "fossgis_osrm_car") -> str:
-    if not a or not b:
-        return ""
-    a_pt = _resolve_point_for_map(a)
-    b_pt = _resolve_point_for_map(b)
+    return _shared_segment_map_url(a, b, engine=engine)
+
+
+def _build_day_route_plan(
+    *,
+    day: int,
+    start_hotel: dict | None,
+    end_hotel: dict | None,
+    breakfast: dict | None,
+    morning: dict | None,
+    lunch: dict | None,
+    afternoon: dict | None,
+    dinner: dict | None,
+) -> List[dict]:
+    route_plan: List[dict] = []
+    legs = [
+        ("Khoi hanh", start_hotel, breakfast),
+        ("Sang", breakfast, morning),
+        ("Trua", morning, lunch),
+        ("Chieu", lunch, afternoon),
+        ("Toi", afternoon, dinner),
+        ("Ve khach san", dinner, end_hotel),
+    ]
+    for sequence, (leg_label, origin, destination) in enumerate(legs, start=1):
+        leg = _build_route_leg(
+            day=day,
+            sequence=sequence,
+            leg_label=leg_label,
+            origin=origin,
+            destination=destination,
+        )
+        if leg is not None:
+            route_plan.append(leg)
+    return route_plan
+
+
+def _build_route_leg(
+    *,
+    day: int,
+    sequence: int,
+    leg_label: str,
+    origin: dict | None,
+    destination: dict | None,
+) -> dict | None:
+    if not origin or not destination:
+        return None
+    from_name = str(origin.get("name") or "").strip()
+    to_name = str(destination.get("name") or "").strip()
+    if not from_name or not to_name or from_name == to_name:
+        return None
+
+    payload: dict[str, object] = {
+        "day": day,
+        "day_label": f"Ngay {day}",
+        "sequence": sequence,
+        "leg_label": leg_label,
+        "from": from_name,
+        "to": to_name,
+        "segment_map_url": _segment_map_url(origin, destination),
+    }
+
+    a_pt, b_pt = _resolve_segment_points(origin, destination)
     if not a_pt or not b_pt:
-        return ""
+        return payload
+
     a_lat, a_lon = a_pt
     b_lat, b_lon = b_pt
-    if a_lat == b_lat and a_lon == b_lon:
-        return ""
-    route = f"{a_lat:.6f},{a_lon:.6f};{b_lat:.6f},{b_lon:.6f}"
-    return (
-        "https://www.openstreetmap.org/directions"
-        f"?engine={quote(engine, safe='')}&route={quote(route, safe=';,')}"
-    )
-
-
-def _route_sequence_label(stops: List[dict | None]) -> str:
-    names: List[str] = []
-    for s in stops:
-        if not s:
-            continue
-        name = str(s.get("name") or "").strip()
-        if not name:
-            continue
-        if not names or names[-1] != name:
-            names.append(name)
-    if len(names) < 2:
-        return ""
-    return " -> ".join(names)
-
-
-def _travel_leg_summaries(stops: List[dict | None]) -> tuple[List[str], List[str]]:
-    legs: List[str] = []
-    maps: List[str] = []
-    for i in range(len(stops) - 1):
-        a = stops[i]
-        b = stops[i + 1]
-        if not a or not b:
-            continue
-        a_name = str(a.get("name") or "").strip()
-        b_name = str(b.get("name") or "").strip()
-        if not a_name or not b_name or a_name == b_name:
-            continue
-        legs.append(f"  - {a_name} -> {b_name}: {_travel_note(a, b)}")
-        seg_map = _segment_map_url(a, b)
-        if seg_map:
-            maps.append(f"  - {a_name} -> {b_name}: {seg_map}")
-    if not legs:
-        legs = ["  - Chua du toa do de tinh khoang cach tung chang."]
-    if not maps:
-        maps = ["  - Chua du toa do de ve map tung chang."]
-    return legs, maps
-
-
-def _travel_note(a: dict | None, b: dict | None) -> str:
-    if not a or not b:
-        return "Di chuyen linh hoat 15-30 phut."
-    a_pt = _resolve_point_for_map(a)
-    b_pt = _resolve_point_for_map(b)
-    if not a_pt or not b_pt:
-        return "Di chuyen linh hoat 15-30 phut."
-    a_lat, a_lon = a_pt
-    b_lat, b_lon = b_pt
-    origin = GeoPoint(lat=a_lat, lon=a_lon)
-    dest = GeoPoint(lat=b_lat, lon=b_lon)
-    fastest = _fastest_route_by_map(origin, dest)
-    segment_map = _segment_map_url(a, b)
+    origin_point = GeoPoint(lat=a_lat, lon=a_lon)
+    destination_point = GeoPoint(lat=b_lat, lon=b_lon)
+    fastest = _fastest_route_by_map(origin_point, destination_point)
+    same_place = _fold(from_name) == _fold(to_name)
     exact_same_point = a_lat == b_lat and a_lon == b_lon
+
     if fastest:
         shown_km = float(fastest["distance_km"])
-        if segment_map and 0.0 < shown_km < 0.2:
+        if not same_place and shown_km < 0.2:
             shown_km = 0.2
-        if exact_same_point:
+        if exact_same_point and same_place:
             shown_km = 0.0
-        recommended_mode = "di bo hoac Grab" if shown_km <= 1.0 else "Grab hoac oto"
-        base = f"~{shown_km:.1f} km, {max(3, int(fastest['eta_min']))} phut, nen di {recommended_mode}."
-        return f"{base} Link chặng: {segment_map}" if segment_map else base
+        payload.update(
+            {
+                "distance_km": round(shown_km, 2),
+                "eta_min": max(3, int(fastest["eta_min"])),
+                "recommended_mode": str(fastest.get("mode") or ""),
+                "mode_label": str(fastest.get("mode_label") or ""),
+                "routing_source": str(fastest.get("source") or "trackasia"),
+            }
+        )
+        return payload
+
     km = _haversine_km(a_lat, a_lon, b_lat, b_lon)
+    if not same_place and km < 0.2:
+        km = 0.2
     eta_min = max(5, int(round(km / 28 * 60)))
-    mode = "di bo hoac Grab" if km <= 1.0 else "Grab hoac oto"
-    base = f"~{km:.1f} km, {eta_min} phut, nen di {mode} (uoc tinh)."
-    return f"{base} Link chặng: {segment_map}" if segment_map else base
+    mode_label = "di bo" if km <= 1.0 else "Grab hoac oto"
+    payload.update(
+        {
+            "distance_km": round(km, 2),
+            "eta_min": eta_min,
+            "recommended_mode": "pedestrian" if km <= 1.0 else "car",
+            "mode_label": mode_label,
+            "routing_source": "haversine_estimate",
+        }
+    )
+    return payload
 
 
 def _resolve_point_for_map(p: dict | None) -> tuple[float, float] | None:
-    if not p:
-        return None
-    lat, lon = p.get("lat"), p.get("lon")
-    if isinstance(lat, (int, float)) and isinstance(lon, (int, float)):
-        return float(lat), float(lon)
-    areas = _extract_admin_areas(p)
-    for area in (
-        "hai chau",
-        "son tra",
-        "ngu hanh son",
-        "thanh khe",
-        "cam le",
-        "lien chieu",
-        "hoa vang",
-        "hoi an",
-        "tam ky",
-        "dien ban",
-        "duy xuyen",
-        "dai loc",
-        "thang binh",
-        "tien phuoc",
-        "nui thanh",
-    ):
-        if area in areas and area in _AREA_CENTROIDS:
-            return _AREA_CENTROIDS[area]
-    city_key = _place_city_key(p)
-    if city_key and city_key in _AREA_CENTROIDS:
-        return _AREA_CENTROIDS[city_key]
-    return None
+    return _shared_resolve_point_for_map(p)
+
+
+def _resolve_segment_points(
+    a: dict | None,
+    b: dict | None,
+) -> tuple[tuple[float, float] | None, tuple[float, float] | None]:
+    return _shared_resolve_segment_points(a, b)
 
 
 def _fastest_route_by_map(origin: GeoPoint, destination: GeoPoint) -> dict | None:
-    mode_labels = {"car": "oto / Grab", "scooter": "xe may", "pedestrian": "di bo"}
+    mode_labels = {
+        "car": "oto / Grab",
+        "truck": "xe tai",
+        "scooter": "xe may",
+        "pedestrian": "di bo",
+    }
     best: dict | None = None
-    for mode in ["car", "scooter", "pedestrian"]:
+    for mode in configured_route_modes():
         est = estimate_route(origin, destination, travel_mode=mode)
         if not est:
             continue
         cand = {
             "mode": mode,
-            "mode_label": mode_labels[mode],
+            "mode_label": mode_labels.get(mode, mode),
             "eta_min": max(1, int(round(est.travel_time_s / 60))),
             "distance_km": float(est.distance_m) / 1000,
-            "source": "mytomtom",
+            "source": "trackasia",
         }
         if best is None or cand["eta_min"] < best["eta_min"]:
             best = cand
@@ -2374,13 +2445,7 @@ def _fastest_route_by_map(origin: GeoPoint, destination: GeoPoint) -> dict | Non
 
 
 def _haversine_km(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
-    r = 6371.0
-    p1 = radians(lat1)
-    p2 = radians(lat2)
-    dp = radians(lat2 - lat1)
-    dl = radians(lon2 - lon1)
-    a = sin(dp / 2) ** 2 + cos(p1) * cos(p2) * sin(dl / 2) ** 2
-    return 2 * r * asin(sqrt(a))
+    return _shared_haversine_km(lat1, lon1, lat2, lon2)
 
 
 def _is_quality_attraction_name(name: str) -> bool:

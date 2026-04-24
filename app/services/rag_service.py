@@ -4,7 +4,6 @@ from dataclasses import dataclass
 from math import asin, cos, radians, sin, sqrt
 import re
 from typing import Any, List, Optional
-from urllib.parse import quote
 
 from app.agents.intake_agent import evaluate_intake
 from app.agents.context_builder_agent import build_context_from_places
@@ -15,13 +14,19 @@ from app.agents.itinerary_builder import (
 )
 from app.services.place_fit_scoring import local_catalog_sufficient
 from app.services.query_utils import extract_trip_days
+from app.services.route_utils import (
+    place_map_url,
+    resolve_point_for_map,
+    resolve_segment_points,
+    segment_map_url,
+)
 from app.services.vector_rag import format_chunk_context, retrieve_chunk_hits
 from app.tools.elasticsearch_tool import search_processed_places
 from app.tools.local_catalog_tool import (
     MIN_LOCAL_FIT_TO_SKIP_EXTERNAL,
     LOCAL_FETCH_MULTIPLIER,
 )
-from app.tools.mytomtom_tool import GeoPoint, estimate_route
+from app.tools.trackasia_tool import GeoPoint, configured_route_modes, estimate_route
 
 _AREA_TOKENS = (
     "hai chau",
@@ -91,7 +96,7 @@ def retrieve_trip_artifacts(
     trace: List[str] = []
 
     fetch_k = max(top_k * LOCAL_FETCH_MULTIPLIER, top_k + 4, 8)
-    trace.append("local_elasticsearch")
+    trace.append("elasticsearch_index")
     trace.append("hybrid_vector_rag")
     if category == "restaurant":
         local_ranked = search_processed_places(query=query, source_kind="restaurants", top_k=fetch_k)
@@ -493,27 +498,41 @@ def _build_verified_places(sources: List[dict]) -> List[dict]:
 
 
 def _build_route_plan(verified_places: List[dict]) -> List[dict]:
-    points = [
-        place
-        for place in verified_places
-        if isinstance(place.get("lat"), (int, float)) and isinstance(place.get("lon"), (int, float))
-    ][:4]
+    points: List[dict[str, Any]] = []
+    for place in verified_places:
+        if not resolve_point_for_map(place):
+            continue
+        points.append(dict(place))
+        if len(points) >= 4:
+            break
     if len(points) < 2:
         return []
     routes: List[dict] = []
     for i in range(len(points) - 1):
         a = points[i]
         b = points[i + 1]
-        o = GeoPoint(lat=float(a["lat"]), lon=float(a["lon"]))
-        d = GeoPoint(lat=float(b["lat"]), lon=float(b["lon"]))
+        a_point, b_point = resolve_segment_points(a, b)
+        if not a_point or not b_point:
+            continue
+        o = GeoPoint(lat=float(a_point[0]), lon=float(a_point[1]))
+        d = GeoPoint(lat=float(b_point[0]), lon=float(b_point[1]))
         fastest = _fastest_mode(o, d)
+        raw_distance_km = float(fastest["distance_m"] / 1000)
+        same_place = (
+            str(a.get("name") or "").strip().lower()
+            == str(b.get("name") or "").strip().lower()
+        )
+        shown_distance_km = 0.0 if same_place and raw_distance_km <= 0.01 else raw_distance_km
+        if not same_place and shown_distance_km < 0.2:
+            shown_distance_km = 0.2
         routes.append(
             {
                 "from": a["name"],
                 "to": b["name"],
-                "from_map_url": a.get("map_url"),
-                "to_map_url": b.get("map_url"),
-                "distance_km": round(fastest["distance_m"] / 1000, 2),
+                "from_map_url": a.get("map_url") or place_map_url(a),
+                "to_map_url": b.get("map_url") or place_map_url(b),
+                "segment_map_url": segment_map_url(a, b),
+                "distance_km": round(shown_distance_km, 2),
                 "eta_min": fastest["eta_min"],
                 "recommended_mode": fastest["mode"],
                 "mode_label": fastest["mode_label"],
@@ -524,25 +543,30 @@ def _build_route_plan(verified_places: List[dict]) -> List[dict]:
 
 
 def _fastest_mode(origin: GeoPoint, destination: GeoPoint) -> dict:
-    modes = [("car", "ô tô/Grab"), ("scooter", "xe máy"), ("pedestrian", "đi bộ")]
+    mode_labels = {
+        "car": "ô tô/Grab",
+        "truck": "xe tải",
+        "scooter": "xe máy",
+        "pedestrian": "đi bộ",
+    }
     best: dict | None = None
-    for mode, label in modes:
+    for mode in configured_route_modes():
         est = estimate_route(origin, destination, travel_mode=mode)
         if not est:
             continue
         cand = {
             "mode": mode,
-            "mode_label": label,
+            "mode_label": mode_labels.get(mode, mode),
             "eta_min": max(1, int(round(est.travel_time_s / 60))),
             "distance_m": float(est.distance_m),
-            "routing_source": "mytomtom",
+            "routing_source": "trackasia",
         }
         if best is None or cand["eta_min"] < best["eta_min"]:
             best = cand
     if best:
         return best
 
-    # Fallback when MyTomTom key is missing.
+    # Fallback when TrackAsia routing is unavailable.
     dist_m = _haversine_m(origin.lat, origin.lon, destination.lat, destination.lon)
     # Assume city average speed 28 km/h for scooter
     eta_min = max(1, int(round((dist_m / 1000) / 28 * 60)))
@@ -572,18 +596,16 @@ def _map_url(
     address: object = "",
     city: object = "",
 ) -> Optional[str]:
-    if not isinstance(lat, (int, float)) or not isinstance(lon, (int, float)):
-        q = " ".join(
-            [
-                str(name or "").strip(),
-                str(address or "").strip(),
-                str(city or "").strip(),
-            ]
-        ).strip()
-        if not q:
-            return None
-        return f"https://www.openstreetmap.org/search?query={quote(q)}"
-    return f"https://www.openstreetmap.org/?mlat={float(lat):.6f}&mlon={float(lon):.6f}#map=16/{float(lat):.6f}/{float(lon):.6f}"
+    url = place_map_url(
+        {
+            "name": str(name or "").strip(),
+            "address": str(address or "").strip(),
+            "city": str(city or "").strip(),
+            "lat": lat,
+            "lon": lon,
+        }
+    )
+    return url or None
 
 
 def _target_city_key_from_query(query: str) -> str:

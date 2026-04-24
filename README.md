@@ -1,13 +1,13 @@
 # Multi-Agent Travel Planning Assistant
 
-An intelligent travel itinerary planning system built with **FastAPI**, **LangGraph**, **PostgreSQL**, and **Elasticsearch**. PostgreSQL is the source of truth for places, sessions, conversations, plans, and RAG chunks; Elasticsearch is a synced search index used for fast lexical retrieval.
+An intelligent travel itinerary planning system built with **FastAPI**, **LangGraph**, **PostgreSQL**, and **Elasticsearch**. PostgreSQL is the source of truth for operational data, while Elasticsearch is the synced search index for fast place retrieval.
 
 ## 🚀 Quick Start
 
 ### Prerequisites
 - Python 3.9+
 - PostgreSQL
-- Elasticsearch (for place search)
+- Elasticsearch
 - API keys (optional):
   - **OpenRouter** or **OpenAI**: For enhanced LLM features (research, answer generation)
   - Without API keys, the system uses deterministic fallback responses
@@ -19,14 +19,19 @@ An intelligent travel itinerary planning system built with **FastAPI**, **LangGr
 pip install -r requirements.txt
 ```
 
-### 2. **Prepare data (optional but recommended):**
+### 2. **Start Elasticsearch (required for index sync):**
+```bash
+docker compose -f docker/docker-compose.yml up -d elasticsearch
+```
+
+### 3. **Prepare data (optional but recommended):**
 ```bash
 python scripts/preprocess.py    # Unify place data and upsert into PostgreSQL
 python scripts/build_rag.py     # Build RAG chunks and sync them into PostgreSQL
-python scripts/ingest_to_es.py  # Sync PostgreSQL places into Elasticsearch
+python scripts/ingest_to_es.py  # Sync PostgreSQL places + chunks into Elasticsearch
 ```
 
-3. **Start the backend:**
+4. **Start the backend:**
 ```bash
 uvicorn app.main:app --reload
 ```
@@ -84,6 +89,7 @@ Note:
 #### `/app/services/`
 - **`planning_tools.py`**: Tool wrappers used internally by the planning agent
 - **`place_repository.py`**: PostgreSQL-backed source of truth for places and RAG chunks
+- **`elasticsearch_sync.py`**: Syncs PostgreSQL travel data into Elasticsearch indices
 - **`rag_service.py`**: RAG orchestration and artifact retrieval
 - **`vector_rag.py`**: Vector search and semantic chunking
 - **`place_fit_scoring.py`**: Scores places by relevance to user interests
@@ -91,11 +97,11 @@ Note:
 - **`response_formatter.py`**: Formats final responses and follow-up questions
 
 #### `/app/tools/`
-- **`elasticsearch_tool.py`**: Elasticsearch place search with PostgreSQL fallback/source catalog
+- **`elasticsearch_tool.py`**: Retrieval adapter that queries Elasticsearch first, then falls back to PostgreSQL
 - **`nominatim_tool.py`**: OpenStreetMap geocoding fallback (free, no API key required)
 - **`google_places_tool.py`**: Optional compatibility layer for Google enrichment hooks
-- **`mytomtom_tool.py`**: TomTom routing and distance calculation (optional)
-- **`local_catalog_tool.py`**: Catalog retrieval adapter over PostgreSQL/Elasticsearch
+- **`trackasia_tool.py`**: TrackAsia geocoding and directions integration
+- **`local_catalog_tool.py`**: Catalog retrieval adapter over PostgreSQL
 
 ### Data Flow (3-Agent Architecture)
 
@@ -112,7 +118,7 @@ User Input
 │  AGENT 2: Planning Agent (Orchestrator)                          │
 │  Uses internal tools:                                            │
 │  ├─ prepare_query_tool                                           │
-│  ├─ retrieve_places_tool (PostgreSQL + Elasticsearch + Vector)   │
+│  ├─ retrieve_places_tool (Elasticsearch + Vector RAG)            │
 │  ├─ score_places_tool                                            │
 │  ├─ research_tool                                                │
 │  └─ build_itinerary_tool                                         │
@@ -150,7 +156,7 @@ Central agent that orchestrates all planning steps using internal tools:
 
 **Tool 2: Retrieve Places**
 - Hybrid search combining:
-  - **Lexical search**: Elasticsearch keyword matching
+  - **Lexical search**: Elasticsearch index synced from PostgreSQL
   - **Vector search**: Semantic similarity over RAG chunks
 - Enriches results with metadata
 
@@ -186,11 +192,11 @@ Converts structured output to user-friendly format
 
 The system uses hybrid retrieval combining lexical and semantic search:
 
-- **Source of Truth**: PostgreSQL stores place records and RAG chunks
-- **Lexical Search**: Elasticsearch indexes PostgreSQL places for precise place-name lookup
+- **Source of Truth**: PostgreSQL stores places, place chunks, sessions, conversations, and plans
+- **Search Index**: Elasticsearch stores synced `places` and `place_chunks` indices for low-latency retrieval
+- **Lexical Search**: Elasticsearch multi-field ranking over place name, description, snippets, address, and tags
 - **Vector Search**: Semantic similarity using embeddings for contextual matching
-- **Chunk-level Storage**: Documents are split into ~120-word overlapping chunks and stored in PostgreSQL
-- **Fallback Strategy**: If embeddings unavailable, system defaults to lexical-only search
+- **Fallback Strategy**: If Elasticsearch is unavailable, runtime falls back to PostgreSQL/local catalog search
 
 ### RAG Pipeline
 
@@ -203,9 +209,10 @@ python scripts/preprocess.py
 python scripts/build_rag.py
 # Output: PostgreSQL place_chunks + export files in data/rag/
 
-# 3. Sync search index
+# 3. Sync searchable indices into Elasticsearch
 python scripts/ingest_to_es.py
-# Output: Elasticsearch index synced from PostgreSQL
+# Output: Elasticsearch indices for places and place_chunks
+
 ```
 
 ## 🔧 Configuration
@@ -221,11 +228,21 @@ OPENAI_API_KEY=your_key                  # Alternative: OpenAI API
 GOOGLE_MAPS_API_KEY=your_key             # Google Places API
 GOOGLE_PLACES_ENRICH_ENABLED=false       # Enable Google Places enrichment
 PLACES_RESOLVER_ENABLED=false            # Enable Nominatim caching
-MYTOMTOM_API_KEY=your_key                # TomTom routing (optional)
+TRACKASIA_API_KEY=your_token             # TrackAsia token from account.track-asia.com/tokens
+TRACKASIA_ENABLED=true                   # Master switch for all TrackAsia calls
+TRACKASIA_GEOCODE_ENABLED=true           # Allow TrackAsia geocode/reverse-geocode
+TRACKASIA_ROUTING_ENABLED=true           # Allow TrackAsia directions
+TRACKASIA_NEW_ADMIN=true                 # Use Vietnam's new administrative boundaries
+TRACKASIA_ROUTE_MODES=car                # Cheapest default; avoid comparing every mode
+TRACKASIA_CACHE_TTL_S=900                # Cache TrackAsia responses for 15 minutes
+TRACKASIA_RATE_LIMIT_WINDOW_S=60         # Sliding window for cost protection
+TRACKASIA_RATE_LIMIT_MAX_CALLS=60        # Max TrackAsia calls per window per backend process
 
-# Core Services
-ELASTICSEARCH_URL=http://localhost:9200  # Elasticsearch endpoint
 DATABASE_URL=postgresql://postgres:postgres@localhost:5432/travel
+ELASTICSEARCH_URL=http://localhost:9200
+ELASTICSEARCH_PLACES_INDEX=travel_places
+ELASTICSEARCH_PLACE_CHUNKS_INDEX=travel_place_chunks
+ELASTICSEARCH_SYNC_ENABLED=false        # Turn on only when Elasticsearch is already running
 
 # RAG Settings
 RAG_CHUNK_SIZE_WORDS=120                 # Chunk size for documents
@@ -237,10 +254,18 @@ PLACES_RESOLVER_BASE_URL=https://nominatim.openstreetmap.org
 PLACES_RESOLVER_COUNTRY_CODES=vn
 ```
 
+Frontend map viewer (`frontend/.env.local`):
+
+```env
+NEXT_PUBLIC_API_BASE_URL=http://localhost:8000/api
+```
+
+The frontend does not need a public TrackAsia API key. Keep the token on the backend only.
+
 ### Running Without API Keys
 
 The system works without any API keys:
-- ✅ Place search via Elasticsearch
+- ✅ Place search via Elasticsearch + vector RAG
 - ✅ Interest extraction and intake flow
 - ✅ Itinerary generation
 - ⚠️ Answer generation and research use deterministic fallbacks
@@ -290,13 +315,14 @@ docker-compose -f docker/docker-compose.yml up
 |--------|---------|
 | `preprocess.py` | Unify place data from multiple sources |
 | `build_rag.py` | Build RAG corpus and embeddings |
-| `ingest_to_es.py` | Index data into Elasticsearch |
+| `ingest_to_es.py` | Sync PostgreSQL travel data into Elasticsearch |
 
 ## 📦 Dependencies
 
 - **FastAPI**: Web framework
 - **LangGraph**: 3-agent orchestration with validation loop and tool execution
-- **Elasticsearch**: Full-text and vector search
+- **PostgreSQL**: Source of truth for places, sessions, conversations, plans, and RAG chunks
+- **Elasticsearch**: Search index synced from PostgreSQL for fast retrieval
 - **Pydantic**: Data validation
 - **OpenAI/OpenRouter SDK**: Optional LLM integration
 - **Sentence Transformers**: For embeddings/RAG
@@ -311,6 +337,7 @@ MIT License - Feel free to use for personal and commercial projects.
 
 ✅ Streamlined 3-agent architecture  
 ✅ Multi-stage planning within Planning Agent  
+✅ PostgreSQL source of truth + Elasticsearch sync  
 ✅ Hybrid lexical + vector search  
 ✅ Automatic interest extraction  
 ✅ Day-by-day itinerary generation  

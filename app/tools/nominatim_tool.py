@@ -42,3 +42,43 @@ def search_places(query: str, limit: int = 5) -> list[dict]:
             }
         )
     return out
+
+
+def reverse_geocode(lat: float, lon: float, zoom: int = 18) -> dict | None:
+    qs = urllib.parse.urlencode(
+        {
+            "lat": f"{float(lat):.7f}",
+            "lon": f"{float(lon):.7f}",
+            "format": "jsonv2",
+            "zoom": max(3, min(int(zoom), 18)),
+        }
+    )
+    req = urllib.request.Request(
+        f"https://nominatim.openstreetmap.org/reverse?{qs}",
+        headers={"User-Agent": _UA},
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=12) as resp:
+            item = json.loads(resp.read().decode("utf-8"))
+    except Exception:
+        return None
+    if not isinstance(item, dict):
+        return None
+    raw_lat = item.get("lat")
+    raw_lon = item.get("lon")
+    display_name = str(item.get("display_name") or "").strip()
+    if raw_lat is None or raw_lon is None or not display_name:
+        return None
+    name = str(item.get("name") or "").strip() or display_name.split(",")[0].strip()
+    try:
+        return {
+            "name": name,
+            "lat": float(raw_lat),
+            "lon": float(raw_lon),
+            "address": display_name,
+            "osm_class": str(item.get("class") or ""),
+            "osm_type": str(item.get("type") or ""),
+            "source": "nominatim_reverse",
+        }
+    except (TypeError, ValueError):
+        return None

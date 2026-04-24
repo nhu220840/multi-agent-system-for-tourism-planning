@@ -78,15 +78,6 @@ export async function initSession(): Promise<SessionInfo> {
   return parseJson<SessionInfo>(response, "Session init failed");
 }
 
-export async function readSession(): Promise<SessionInfo> {
-  const response = await fetch(`${API_BASE}/session/me`, {
-    method: "GET",
-    credentials: "include",
-  });
-
-  return parseJson<SessionInfo>(response, "Session lookup failed");
-}
-
 export async function listConversations(): Promise<ConversationSummary[]> {
   const response = await fetch(`${API_BASE}/conversations`, {
     method: "GET",

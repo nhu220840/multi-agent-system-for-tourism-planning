@@ -11,6 +11,7 @@ if str(_root) not in sys.path:
     sys.path.insert(0, str(_root))
 
 from app.services.external_place_store import load_external_places
+from app.services.elasticsearch_sync import search_places_index
 from app.services.place_fit_scoring import add_fit_scores
 from app.services.place_metadata import enrich_places
 from app.services.place_repository import list_places
@@ -29,12 +30,14 @@ def search_processed_places(
     source_kind: str,
     top_k: int = 8,
 ) -> list[dict]:
-    """DB-only explicit source selection for itinerary building."""
+    """Hybrid retrieval: Elasticsearch first, PostgreSQL fallback, then vector merge."""
     terms = [_fold_text(t) for t in query.split() if t.strip()]
     if not terms:
         return []
     fetch_k = max(top_k * 3, top_k + 8, 24)
-    rows = _search_unified_catalog(terms=terms, source_kind=source_kind, top_k=fetch_k)
+    rows = search_places_index(query=query, source_kind=source_kind, top_k=fetch_k)
+    if not rows:
+        rows = _search_unified_catalog(terms=terms, source_kind=source_kind, top_k=fetch_k)
     if not rows:
         if source_kind == "destinations":
             rows = _search_processed_dest_json(terms, fetch_k)
@@ -59,12 +62,16 @@ def search_processed_places(
     for row in scored:
         has_lexical = bool(row.pop("_has_lexical_hit", False))
         has_vector = bool(row.pop("_has_vector_hit", False))
+        lexical_origin = str(row.get("retrieval_origin") or "").strip() or "local_processed"
         if has_lexical and has_vector:
-            row["retrieval_tier"] = "hybrid_vector_local"
+            if lexical_origin == "elasticsearch":
+                row["retrieval_tier"] = "hybrid_vector_elasticsearch"
+            else:
+                row["retrieval_tier"] = "hybrid_vector_local"
         elif has_vector:
             row["retrieval_tier"] = "vector_rag"
         else:
-            row.setdefault("retrieval_tier", "local_processed")
+            row.setdefault("retrieval_tier", lexical_origin)
     scored.sort(
         key=lambda item: (
             float(item.get("customer_fit_score") or 0.0),
@@ -154,6 +161,7 @@ def _search_unified_catalog(terms: list[str], source_kind: str, top_k: int) -> l
         row = dict(item)
         row["elasticsearch_score"] = 0.0
         row["retrieval_relevance"] = round(rel, 4)
+        row["retrieval_origin"] = "local_processed"
         rows.append(row)
     rows.sort(key=lambda x: float(x.get("retrieval_relevance") or 0), reverse=True)
     return rows[:top_k]
@@ -279,6 +287,7 @@ def _search_processed_dest_json(terms: list[str], top_k: int) -> list[dict]:
                 "source": "local-processed:dest_danang.json",
                 "elasticsearch_score": 0.0,
                 "retrieval_relevance": round(rel, 4),
+                "retrieval_origin": "local_processed",
             }
         )
     rows.sort(key=lambda x: float(x.get("retrieval_relevance") or 0), reverse=True)
@@ -328,6 +337,7 @@ def _search_processed_vcgt_csv(terms: list[str], top_k: int) -> list[dict]:
                 "source": "local-processed:vcgt_danang.csv",
                 "elasticsearch_score": 0.0,
                 "retrieval_relevance": round(rel, 4),
+                "retrieval_origin": "local_processed",
             }
         )
     rows.sort(key=lambda x: float(x.get("retrieval_relevance") or 0), reverse=True)
@@ -380,6 +390,7 @@ def _search_processed_rest_json(terms: list[str], top_k: int) -> list[dict]:
                 "source": "local-processed:rest_danang.json",
                 "elasticsearch_score": 0.0,
                 "retrieval_relevance": round(rel, 4),
+                "retrieval_origin": "local_processed",
             }
         )
     rows.sort(key=lambda x: float(x.get("retrieval_relevance") or 0), reverse=True)
@@ -442,6 +453,7 @@ def _search_processed_accommodation_json(terms: list[str], top_k: int) -> list[d
                 "source": "local-processed:cslt_danang.json",
                 "elasticsearch_score": 0.0,
                 "retrieval_relevance": round(rel, 4),
+                "retrieval_origin": "local_processed",
             }
         )
     rows.sort(key=lambda x: float(x.get("retrieval_relevance") or 0), reverse=True)

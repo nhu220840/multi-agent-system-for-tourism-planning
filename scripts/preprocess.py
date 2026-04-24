@@ -13,6 +13,7 @@ if str(ROOT) not in sys.path:
 
 from app.config.settings import get_settings
 from app.core.database import init_db
+from app.services.elasticsearch_sync import elasticsearch_status, sync_places_index
 from app.services.external_place_store import load_external_places
 from app.services.place_metadata import enrich_place_record, normalize_address_text
 from app.services.place_repository import upsert_places
@@ -59,6 +60,13 @@ def main() -> None:
     print(f"Wrote {len(rows)} normalized places to {OUTPUT_JSONL}")
     inserted = upsert_places(rows)
     print(f"Upserted {inserted} places into PostgreSQL")
+    if settings.elasticsearch_sync_enabled:
+        es_status = elasticsearch_status()
+        if es_status.ok:
+            synced = sync_places_index(recreate=True, places=rows)
+            print(f"Synced {synced} places into Elasticsearch")
+        else:
+            print(f"Skipped Elasticsearch sync: {es_status.message}")
     if use_places_enrichment:
         CACHE_DIR.mkdir(parents=True, exist_ok=True)
         PLACES_CACHE_JSON.write_text(

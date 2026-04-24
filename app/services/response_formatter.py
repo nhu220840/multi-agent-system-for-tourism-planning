@@ -419,10 +419,22 @@ def _clean_user_facing_line(line: str) -> str:
         return ""
     if re.match(r"^[-•]?\s*ly do phu hop:", text, flags=re.IGNORECASE):
         return ""
+    if re.match(r"^(?:tom tat|thong tin) di chuyen:\s*$", text, flags=re.IGNORECASE):
+        return ""
+    if re.match(r"^[-•]?\s*chang\s+\d+\s*:", text, flags=re.IGNORECASE):
+        return ""
+    if re.match(r"^[-•]?\s*Link chặng:", text, flags=re.IGNORECASE):
+        return ""
+    if re.match(r"^[-•]?\s*Nghi dem\s*:", text, flags=re.IGNORECASE):
+        return ""
 
     if text.startswith("• Ban do tuyen ngay:"):
         return ""
     if text.startswith("• Thu tu diem:"):
+        return ""
+    if re.match(r"^(?:[-•]+\s*)?Link chặng:\s*https?://\S+$", text, flags=re.IGNORECASE):
+        return ""
+    if "->" in text and "http" in text and not re.search(r"\b(?:km|phut)\b", text, flags=re.IGNORECASE):
         return ""
     if text == "Map tung chang:":
         return ""

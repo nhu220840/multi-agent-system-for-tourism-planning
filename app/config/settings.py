@@ -6,6 +6,12 @@ from pydantic_settings import BaseSettings
 class Settings(BaseSettings):
     app_env: str = "dev"
     frontend_origin: str = "http://localhost:3000"
+    elasticsearch_url: str = "http://localhost:9200"
+    elasticsearch_places_index: str = "travel_places"
+    elasticsearch_place_chunks_index: str = "travel_place_chunks"
+    elasticsearch_sync_enabled: bool = False
+    elasticsearch_verify_certs: bool = False
+    elasticsearch_request_timeout_s: int = 15
     rag_chunk_size_words: int = 120
     rag_chunk_overlap_words: int = 24
     rag_context_chunks: int = 6
@@ -32,9 +38,17 @@ class Settings(BaseSettings):
     openrouter_reasoning_enabled: bool = True
     openweather_api_key: str = ""
     openweather_base_url: str = "https://api.openweathermap.org"
-    mytomtom_api_key: str = ""
-    mytomtom_base_url: str = "https://api.tomtom.com"
-    elasticsearch_url: str = "http://localhost:9200"
+    trackasia_api_key: str = ""
+    trackasia_enabled: bool = True
+    trackasia_geocode_enabled: bool = True
+    trackasia_routing_enabled: bool = True
+    trackasia_directions_base_url: str = "https://maps.track-asia.com/route/v2/directions"
+    trackasia_request_timeout_s: int = 8
+    trackasia_new_admin: bool = True
+    trackasia_cache_ttl_s: int = 900
+    trackasia_rate_limit_window_s: int = 60
+    trackasia_rate_limit_max_calls: int = 60
+    trackasia_route_modes: str = "car"
     database_url: str = "postgresql://postgres:postgres@localhost:5432/travel"
     session_cookie_name: str = "app_session"
     session_cookie_secure: bool = False
