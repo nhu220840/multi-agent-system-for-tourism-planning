@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from threading import Lock
+from time import monotonic
 from typing import Any
 
 from app.config.settings import get_settings
@@ -12,6 +14,8 @@ _PLACES_CATEGORY_MAP = {
     "restaurants": ["restaurant"],
     "accommodations": ["accommodation"],
 }
+_ES_STATE_LOCK = Lock()
+_ES_UNAVAILABLE_UNTIL = 0.0
 
 
 @dataclass(frozen=True)
@@ -69,6 +73,27 @@ def get_elasticsearch_client():
         verify_certs=bool(settings.elasticsearch_verify_certs),
         request_timeout=max(1, int(settings.elasticsearch_request_timeout_s or 15)),
     )
+
+
+def _elasticsearch_temporarily_unavailable() -> bool:
+    with _ES_STATE_LOCK:
+        return _ES_UNAVAILABLE_UNTIL > monotonic()
+
+
+def _mark_elasticsearch_unavailable() -> None:
+    settings = get_settings()
+    cooldown_s = max(0, int(settings.elasticsearch_failure_cooldown_s or 0))
+    if cooldown_s <= 0:
+        return
+    with _ES_STATE_LOCK:
+        global _ES_UNAVAILABLE_UNTIL
+        _ES_UNAVAILABLE_UNTIL = monotonic() + cooldown_s
+
+
+def _mark_elasticsearch_available() -> None:
+    with _ES_STATE_LOCK:
+        global _ES_UNAVAILABLE_UNTIL
+        _ES_UNAVAILABLE_UNTIL = 0.0
 
 
 def sync_travel_indices(*, recreate: bool = True) -> dict[str, int]:
@@ -149,6 +174,9 @@ def search_places_index(
     source_kind: str,
     top_k: int,
 ) -> list[dict[str, Any]]:
+    if _elasticsearch_temporarily_unavailable():
+        return []
+
     client = get_elasticsearch_client()
     if client is None:
         return []
@@ -158,6 +186,7 @@ def search_places_index(
     try:
         index_exists = client.indices.exists(index=index_name)
     except Exception:
+        _mark_elasticsearch_unavailable()
         return []
     if not index_exists:
         return []
@@ -212,7 +241,9 @@ def search_places_index(
     try:
         response = client.search(index=index_name, body=body)
     except Exception:
+        _mark_elasticsearch_unavailable()
         return []
+    _mark_elasticsearch_available()
     hits = response.get("hits", {}).get("hits", [])
     rows: list[dict[str, Any]] = []
     for hit in hits:

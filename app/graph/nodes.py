@@ -310,11 +310,14 @@ def response_node(state: TravelGraphState) -> dict[str, Any]:
             str((state.get("collected_info") or {}).get("destination") or "")
         )
     ]
+    step_started = perf_counter()
     stay_recommendations = build_stay_recommendations(
         query=state.get("rag_query", state.get("message", "")),
         places=state.get("places", []),
         recommended_hotel=state.get("recommended_hotel"),
     )
+    timings["response_stay_recommendations_ms"] = round((perf_counter() - step_started) * 1000, 1)
+    step_started = perf_counter()
     formatted_answer = format_planning_answer(
         query=state.get("rag_query", state.get("message", "")),
         collected_info=state.get("collected_info"),
@@ -329,7 +332,9 @@ def response_node(state: TravelGraphState) -> dict[str, Any]:
         stay_recommendations=stay_recommendations,
         plan_validation=state.get("plan_validation"),
         verified_places=state.get("verified_places"),
+        route_plan=state.get("route_plan"),
     )
+    timings["response_format_ms"] = round((perf_counter() - step_started) * 1000, 1)
     trace = _append_trace(state, "response_service")
     timings["response_ms"] = round((perf_counter() - started) * 1000, 1)
     response_payload = {
@@ -512,6 +517,8 @@ def _build_debug_steps(state: TravelGraphState, *, stage: str) -> list[dict[str,
                 "final_trace": [_TRACE_TITLE_MAP.get(item, item) for item in trace],
                 "timings_ms": {
                     "response_ms": timings.get("response_ms"),
+                    "response_stay_recommendations_ms": timings.get("response_stay_recommendations_ms"),
+                    "response_format_ms": timings.get("response_format_ms"),
                     "intake_ms": timings.get("intake_ms"),
                 },
             },

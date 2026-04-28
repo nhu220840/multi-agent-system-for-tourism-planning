@@ -12,6 +12,7 @@ class Settings(BaseSettings):
     elasticsearch_sync_enabled: bool = False
     elasticsearch_verify_certs: bool = False
     elasticsearch_request_timeout_s: int = 15
+    elasticsearch_failure_cooldown_s: int = 60
     rag_chunk_size_words: int = 120
     rag_chunk_overlap_words: int = 24
     rag_context_chunks: int = 6
@@ -32,13 +33,14 @@ class Settings(BaseSettings):
     google_places_region_code: str = "VN"
     google_places_request_timeout_s: int = 10
     google_places_follow_moved_limit: int = 2
-    openrouter_api_key: str = ""
+    openrouter_api_key: str = "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"
     openrouter_base_url: str = "https://openrouter.ai/api/v1"
     openrouter_model: str = "openai/gpt-oss-120b:free"
     openrouter_reasoning_enabled: bool = True
+    openrouter_request_timeout_s: int = 20
     openweather_api_key: str = ""
     openweather_base_url: str = "https://api.openweathermap.org"
-    trackasia_api_key: str = ""
+    trackasia_api_key: str = "b6d8d504b5107d6177736152127254cfdc"
     trackasia_enabled: bool = True
     trackasia_geocode_enabled: bool = True
     trackasia_routing_enabled: bool = True

@@ -529,6 +529,8 @@ def _build_route_plan(verified_places: List[dict]) -> List[dict]:
             {
                 "from": a["name"],
                 "to": b["name"],
+                "from_address": str(a.get("address") or "").strip(),
+                "to_address": str(b.get("address") or "").strip(),
                 "from_map_url": a.get("map_url") or place_map_url(a),
                 "to_map_url": b.get("map_url") or place_map_url(b),
                 "segment_map_url": segment_map_url(a, b),

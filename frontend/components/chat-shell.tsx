@@ -54,6 +54,8 @@ type RouteLeg = {
   legLabel: string;
   from: string;
   to: string;
+  fromAddress: string;
+  toAddress: string;
   distanceKm: string;
   etaMin: string;
   modeLabel: string;
@@ -325,6 +327,9 @@ function truncateMiddle(value: string, maxLength = 48): string {
 
 function linkLabelForLine(url: string, line: string, index: number): string {
   const lower = line.toLowerCase();
+  if (url.includes("/routes/") && url.includes("maps.track-asia.com")) {
+    return "Chi duong";
+  }
   if (lower.includes("ban do tuyen ngay")) {
     return index > 0 ? `Mo tuyen ${index + 1}` : "Mo tuyen";
   }
@@ -333,9 +338,6 @@ function linkLabelForLine(url: string, line: string, index: number): string {
   }
   if (lower.includes(" map:")) {
     return index > 0 ? `Mo map ${index + 1}` : "Mo map";
-  }
-  if (url.includes("/routes/") && url.includes("maps.track-asia.com")) {
-    return "Chi duong";
   }
   if (url.includes("/place/") && url.includes("maps.track-asia.com")) {
     return "Xem map";
@@ -760,6 +762,8 @@ function extractRouteLegs(metadata: AssistantMessageMetadata): RouteLeg[] {
         legLabel: readString(record.leg_label) || "",
         from,
         to,
+        fromAddress: readString(record.from_address),
+        toAddress: readString(record.to_address),
         distanceKm: formatDistanceLabel(record.distance_km),
         etaMin: formatEtaLabel(record.eta_min),
         modeLabel,
@@ -768,7 +772,12 @@ function extractRouteLegs(metadata: AssistantMessageMetadata): RouteLeg[] {
         directionUrl: readString(record.segment_map_url) || null,
       } satisfies RouteLeg;
     })
-    .filter((item): item is RouteLeg => Boolean(item));
+    .filter((item): item is RouteLeg => Boolean(item))
+    .sort((a, b) => {
+      const dayA = a.dayNumber ?? Number.MAX_SAFE_INTEGER;
+      const dayB = b.dayNumber ?? Number.MAX_SAFE_INTEGER;
+      return dayA - dayB || a.sequence - b.sequence;
+    });
 }
 
 function classifyRouteMode(modeLabel: string, distanceKm: number | null): { tone: RouteLeg["modeTone"]; badge: string } {
@@ -973,6 +982,45 @@ function SummaryPanel({
           </section>
         ))}
       </div>
+
+      {snapshot.routeLegs.length > 0 ? (
+        <section className="summary-route-block">
+          <span className="summary-card-label">Chi dan tung chang</span>
+          <div className="route-leg-list">
+            {snapshot.routeLegs.map((leg, index) => (
+              <article
+                key={`${leg.dayNumber ?? "day"}-${leg.sequence}-${leg.from}-${leg.to}-${index}`}
+                className="route-leg-item"
+              >
+                <span className="route-leg-label">
+                  {leg.dayNumber ? `Ngay ${leg.dayNumber}` : "Chang di"}
+                  {leg.legLabel ? ` · ${leg.legLabel}` : ""}
+                </span>
+                <strong>
+                  {leg.from} {"->"} {leg.to}
+                </strong>
+                {leg.fromAddress || leg.toAddress ? (
+                  <p>
+                    {leg.fromAddress ? `Di: ${leg.fromAddress}` : ""}
+                    {leg.fromAddress && leg.toAddress ? " · " : ""}
+                    {leg.toAddress ? `Den: ${leg.toAddress}` : ""}
+                  </p>
+                ) : null}
+                <div className="route-leg-meta">
+                  {leg.distanceKm ? <span className="route-leg-chip">{leg.distanceKm}</span> : null}
+                  {leg.etaMin ? <span className="route-leg-chip">{leg.etaMin}</span> : null}
+                  <span className={`route-mode-badge tone-${leg.modeTone}`}>{leg.modeBadge}</span>
+                </div>
+                {leg.directionUrl ? (
+                  <a className="summary-link" href={leg.directionUrl} target="_blank" rel="noreferrer">
+                    Chi duong
+                  </a>
+                ) : null}
+              </article>
+            ))}
+          </div>
+        </section>
+      ) : null}
 
       {nextPrompt ? (
         <div className="summary-note">

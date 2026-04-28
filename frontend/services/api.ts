@@ -49,6 +49,7 @@ export type ChatResponse = {
   conversation_stage?: string;
   follow_up_questions?: string[] | null;
   plan?: string | null;
+  route_plan?: Record<string, unknown>[] | null;
   stay_recommendations?: Record<string, unknown>[] | null;
   research?: string | null;
 };

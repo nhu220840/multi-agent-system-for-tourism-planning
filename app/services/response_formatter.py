@@ -6,6 +6,9 @@ from typing import Any
 from app.services.place_metadata import normalize_address_text
 from app.services.query_utils import extract_trip_days
 
+# Headers produced by upstream agents (kept ASCII-fold because the source
+# strings live in the other services). The final user-facing output below is
+# written in proper diacritic Vietnamese.
 _RESEARCH_HIGHLIGHTS_HEADER = "CAC DIEM NOI BAT:"
 _RESEARCH_STAY_HEADER = "KHU VUC NEN O:"
 _RESEARCH_TIPS_HEADER = "TRAVEL TIPS:"
@@ -16,13 +19,15 @@ _COORDINATOR_TOP_HEADER = "TOP 3 TRAI NGHIEM NEN UU TIEN:"
 _COORDINATOR_CHALLENGE_HEADER = "THACH THUC CO THE GAP & CACH XU LY:"
 _COORDINATOR_CHECKLIST_HEADER = "CHECKLIST TRUOC CHUYEN DI:"
 
+_SECTION_DIVIDER = "──────────────────────────────"
+
 
 def build_time_confirmation_question(destination: str) -> str:
-    place_label = destination or "diem den nay"
+    place_label = destination or "điểm đến này"
     return (
-        f"Ban du dinh di {place_label} vao ngay cu the nao hoac vao giai doan nao "
-        "(vi du: cuoi thang 6, mua he, dip le 2/9)? "
-        "Khi ban chot thoi gian, minh se doi chieu thoi tiet va nhac ban can chuan bi gi."
+        f"Bạn dự định đi {place_label} vào ngày cụ thể nào hoặc vào giai đoạn nào "
+        "(ví dụ: cuối tháng 6, mùa hè, dịp lễ 2/9)? "
+        "Khi bạn chốt thời gian, mình sẽ đối chiếu thời tiết và nhắc bạn cần chuẩn bị gì."
     )
 
 
@@ -41,9 +46,10 @@ def format_planning_answer(
     stay_recommendations: list[dict[str, Any]] | None,
     plan_validation: dict[str, Any] | None,
     verified_places: list[dict[str, Any]] | None,
+    route_plan: list[dict[str, Any]] | None = None,
 ) -> str:
     destination = _destination_label(query=query, collected_info=collected_info)
-    days = _trip_days_label(query=query, collected_info=collected_info)
+    days_label = _trip_days_label(query=query, collected_info=collected_info)
     research_sections = _parse_research_summary(research or "")
     itinerary_sections = _parse_itinerary_plan(plan or "")
     coordinator_sections = _parse_coordinator_plan(coordinator_plan or "")
@@ -66,44 +72,46 @@ def format_planning_answer(
     intro = research_sections["overview"]
     if not intro:
         intro = (
-            f"Minh da tong hop mot ke hoach {days} tai {destination} "
-            "de ban co the tham khao va dieu chinh tiep theo nhu cau thuc te."
+            f"{destination} là điểm đến phù hợp cho hành trình {days_label} "
+            "với trải nghiệm cân bằng giữa tham quan, ẩm thực và văn hoá. "
+            "Mình đã tổng hợp gợi ý bên dưới để bạn tham khảo và tinh chỉnh theo nhu cầu thực tế."
         )
 
-    lines: list[str] = [
-        f"KE HOACH DU LICH GOI Y - {destination.upper()}",
-        "",
-        "Tom tat nhanh:",
-        intro,
-    ]
-    if weather_lines:
-        lines.extend(["", "Tinh hinh thoi tiet/thoi diem hien co:", *weather_lines])
+    lines: list[str] = []
 
-    if highlight_lines:
-        lines.extend(["", "Diem nhan hanh trinh:", *highlight_lines])
-
-    if stay_lines:
-        lines.extend(["", "Luu tru de xuat:", *stay_lines])
-
-    if itinerary_sections["day_blocks"]:
-        lines.extend(["", "Lich trinh chi tiet tung ngay:", *itinerary_sections["day_blocks"]])
-
-    if transport_lines:
+    def add_section(title: str, body_lines: list[str], *, keep_blank: bool = False) -> None:
+        if keep_blank:
+            body = list(body_lines)
+            while body and not str(body[0]).strip():
+                body.pop(0)
+            while body and not str(body[-1]).strip():
+                body.pop()
+            cleaned = body
+        else:
+            cleaned = [line for line in body_lines if str(line).strip()]
+        if not cleaned:
+            return
+        if lines:
+            lines.append("")
+            lines.append(_SECTION_DIVIDER)
+            lines.append("")
+        lines.append(title)
         lines.append("")
-        lines.append("Di chuyen goi y:")
-        lines.extend(transport_lines)
+        lines.extend(cleaned)
 
-    if tips_lines:
-        lines.extend(["", "Tips va luu y truoc chuyen di:", *tips_lines[:10]])
+    lines.append(f"KẾ HOẠCH DU LỊCH GỢI Ý — {destination.upper()}")
+    lines.append(f"Hành trình: {days_label}")
 
-    lines.extend(
-        [
-            "",
-            "De minh tinh chinh theo thoi gian thuc te:",
-            follow_up,
-        ]
-    )
-    return "\n".join(line for line in lines if line is not None).strip()
+    add_section("TÓM TẮT NHANH", [intro])
+    add_section("THỜI TIẾT & THỜI ĐIỂM", weather_lines)
+    add_section("ĐIỂM NHẤN HÀNH TRÌNH", highlight_lines)
+    add_section("NƠI LƯU TRÚ ĐỀ XUẤT", stay_lines)
+    add_section("LỊCH TRÌNH CHI TIẾT", itinerary_sections["day_blocks"], keep_blank=True)
+    add_section("DI CHUYỂN GỢI Ý", transport_lines)
+    add_section("MẸO & LƯU Ý", tips_lines[:10])
+    add_section("BƯỚC TIẾP THEO", [follow_up])
+
+    return "\n".join(lines).strip()
 
 
 def _destination_label(query: str, collected_info: dict[str, Any] | None) -> str:
@@ -111,23 +119,23 @@ def _destination_label(query: str, collected_info: dict[str, Any] | None) -> str
     if destination:
         return destination
     lowered = (query or "").lower()
-    if "hoi an" in lowered:
-        return "Hoi An"
-    if "quang nam" in lowered:
-        return "Quang Nam"
-    if "da nang" in lowered or "danang" in lowered or "da nang" in lowered:
-        return "Da Nang"
-    return "Diem den da chon"
+    if "hoi an" in lowered or "hội an" in lowered:
+        return "Hội An"
+    if "quang nam" in lowered or "quảng nam" in lowered:
+        return "Quảng Nam"
+    if "da nang" in lowered or "danang" in lowered or "đà nẵng" in lowered:
+        return "Đà Nẵng"
+    return "Điểm đến đã chọn"
 
 
 def _trip_days_label(query: str, collected_info: dict[str, Any] | None) -> str:
     raw_days = str((collected_info or {}).get("days") or "").strip()
     if raw_days.isdigit():
-        return f"{raw_days} ngay"
+        return f"{raw_days} ngày"
     days = extract_trip_days(query)
     if days:
-        return f"{days} ngay"
-    return "vai ngay"
+        return f"{days} ngày"
+    return "vài ngày"
 
 
 def _parse_research_summary(text: str) -> dict[str, Any]:
@@ -154,11 +162,11 @@ def _parse_research_summary(text: str) -> dict[str, Any]:
         if section == "overview":
             overview_parts.append(line)
         elif section == "highlights":
-            highlights.append(_dashify(line))
+            highlights.append(_bulletify(line))
         elif section == "stay":
-            stay_lines.append(_dashify(line))
+            stay_lines.append(_bulletify(line))
         elif section == "tips":
-            tip_lines.append(_dashify(line))
+            tip_lines.append(_bulletify(line))
 
     return {
         "overview": " ".join(overview_parts).strip(),
@@ -181,34 +189,42 @@ def _parse_itinerary_plan(text: str) -> dict[str, Any]:
     for raw_line in lines[1:]:
         line = raw_line.strip()
         if not line:
+            if current_day_title and (not current_day_lines or current_day_lines[-1] != ""):
+                current_day_lines.append("")
             continue
         if line == _PLAN_STAY_HEADER:
             in_stay = True
             continue
-        if line.startswith("NGAY "):
+        if _is_day_header(line):
             if current_day_title:
                 day_blocks.append(_render_day_block(current_day_title, current_day_lines))
-            current_day_title = line
+                day_blocks.append("")
+            current_day_title = _format_day_header(line)
             current_day_lines = []
             in_stay = False
             continue
-        if line.startswith(_PLAN_SUMMARY_PREFIX):
-            note_lines.append(_dashify(line.split(":", 1)[1].strip()))
+        if line.startswith(_PLAN_SUMMARY_PREFIX) or line.lower().startswith("gợi ý tổng quan:"):
+            note_lines.append(_bulletify(line.split(":", 1)[1].strip()))
             continue
-        if line.startswith(_PLAN_NOTE_PREFIX):
-            note_lines.append(_dashify(line.split(":", 1)[1].strip()))
+        if line.startswith(_PLAN_NOTE_PREFIX) or line.lower().startswith("lưu ý:"):
+            note_lines.append(_bulletify(line.split(":", 1)[1].strip()))
             continue
         if in_stay:
             cleaned = _clean_user_facing_line(line)
             if cleaned:
-                stay_lines.append(_dashify(cleaned))
+                stay_lines.append(_bulletify(cleaned))
         elif current_day_title:
             cleaned = _clean_user_facing_line(line)
             if cleaned:
                 current_day_lines.append(cleaned)
 
     if current_day_title:
+        while current_day_lines and not current_day_lines[-1]:
+            current_day_lines.pop()
         day_blocks.append(_render_day_block(current_day_title, current_day_lines))
+
+    while day_blocks and not day_blocks[-1].strip():
+        day_blocks.pop()
 
     return {
         "stay_lines": stay_lines,
@@ -241,11 +257,11 @@ def _parse_coordinator_plan(text: str) -> dict[str, Any]:
             section = ""
             continue
         if section == "top":
-            top_lines.append(_dashify(line))
+            top_lines.append(_bulletify(line))
         elif section == "challenge":
-            challenge_lines.append(_dashify(line))
+            challenge_lines.append(_bulletify(line))
         elif section == "checklist":
-            checklist_lines.append(_dashify(line.replace("□", "").strip()))
+            checklist_lines.append(_bulletify(line.replace("□", "").strip()))
 
     return {
         "top_lines": top_lines,
@@ -279,10 +295,10 @@ def _choose_highlights(
         address = normalize_address_text(str(item.get("address") or ""))
         detail = name
         if category and category.strip().lower() not in {"destination", "tourism"}:
-            detail += f" - {category}"
+            detail += f" — {category}"
         if address:
             detail += f" ({address})"
-        out.append(f"- {detail}")
+        out.append(f"• {detail}")
     return out
 
 
@@ -303,40 +319,39 @@ def _format_stay_lines(
             why_fit = str(item.get("why_fit") or "").strip()
             if not segment or not name:
                 continue
-            out.append(f"- {segment}: {name}")
+            out.append(f"• {segment}: {name}")
             if price_note:
-                out.append(f"- Gia tham khao: {price_note}")
+                out.append(f"   – Giá tham khảo: {price_note}")
             if address:
-                out.append(f"- Dia chi: {address}")
+                out.append(f"   – Địa chỉ: {address}")
             if why_fit:
-                out.append(f"- Phu hop vi: {why_fit}")
-            out.append("")
-        return [line for line in out if line.strip()]
+                out.append(f"   – Phù hợp vì: {why_fit}")
+        return out
 
     if isinstance(recommended_hotel, dict) and recommended_hotel:
         if recommended_hotel.get("type") == "multi_city_stay":
             out: list[str] = []
             for segment in recommended_hotel.get("segments", []) or []:
                 hotel = segment.get("hotel") or {}
-                hotel_name = str(hotel.get("name") or "").strip() or "chua co ten khach san"
+                hotel_name = str(hotel.get("name") or "").strip() or "chưa có tên khách sạn"
                 city_label = str(segment.get("city_label") or segment.get("city_key") or "").strip()
                 days = segment.get("days") or []
                 day_label = _days_compact_label(days)
                 address = str(hotel.get("address") or "").strip()
-                line = f"- {day_label}: o tai {hotel_name}"
+                line = f"• {day_label}: nghỉ tại {hotel_name}"
                 if city_label:
                     line += f" ({city_label})"
-                if address:
-                    line += f" - {address}"
                 out.append(line)
+                if address:
+                    out.append(f"   – Địa chỉ: {address}")
             if out:
                 return out
         name = str(recommended_hotel.get("name") or "").strip()
         if name:
-            out = [f"- Khach san goi y chinh: {name}"]
+            out = [f"• Khách sạn gợi ý chính: {name}"]
             address = normalize_address_text(str(recommended_hotel.get("address") or ""))
             if address:
-                out.append(f"- Dia chi: {address}")
+                out.append(f"   – Địa chỉ: {address}")
             return out
 
     if stay_plan:
@@ -346,11 +361,11 @@ def _format_stay_lines(
             hotel_name = str(hotel.get("name") or "").strip()
             if not hotel_name:
                 continue
-            line = f"- {str(segment.get('days_label') or _days_compact_label(segment.get('days') or [])).strip()}: {hotel_name}"
+            day_label = str(segment.get("days_label") or _days_compact_label(segment.get("days") or [])).strip()
+            out.append(f"• {day_label}: {hotel_name}")
             address = str(hotel.get("address") or "").strip()
             if address:
-                line += f" - {address}"
-            out.append(line)
+                out.append(f"   – Địa chỉ: {address}")
         if out:
             return out
 
@@ -358,7 +373,7 @@ def _format_stay_lines(
 
 
 def _format_transport_lines(transport: list[str]) -> list[str]:
-    return [_dashify(line) for line in transport if str(line).strip()]
+    return [_bulletify(line) for line in transport if str(line).strip()]
 
 
 def _format_weather_lines(
@@ -367,31 +382,33 @@ def _format_weather_lines(
 ) -> list[str]:
     if not weather:
         lines = [
-            "- Hien ban chua chot ngay di cu the, vi vay minh moi de lich trinh o muc khung tham khao.",
-            "- Khi ban gui ngay/thang hoac mua du lich, minh se doi chieu thoi tiet va nhac ban can mang theo gi.",
+            "• Hiện bạn chưa chốt ngày đi cụ thể, vì vậy lịch trình đang để ở khung tham khảo.",
+            "• Khi bạn gửi ngày/tháng hoặc mùa du lịch, mình sẽ đối chiếu thời tiết và nhắc bạn cần mang theo gì.",
         ]
         if mobility_plan:
             fastest = str(mobility_plan.get("fastest_mode_label") or "").strip()
             eta = mobility_plan.get("avg_eta_min")
             if fastest:
-                extra = f"- Tam thoi, phuong an di chuyen nhanh nhat dang uu tien la {fastest}"
+                extra = f"• Tạm thời, phương án di chuyển nhanh nhất đang ưu tiên là {fastest}"
                 if isinstance(eta, (int, float)):
-                    extra += f", ETA trung binh khoang {int(round(float(eta)))} phut."
+                    extra += f", ETA trung bình khoảng {int(round(float(eta)))} phút."
+                else:
+                    extra += "."
                 lines.append(extra)
         return lines
 
-    location = str(weather.get("location") or "diem den").strip()
+    location = str(weather.get("location") or "điểm đến").strip()
     description = str(weather.get("description") or "").strip()
     temp = weather.get("temp_c")
     wind = weather.get("wind_kmh")
-    line = f"- Tham khao hien tai tai {location}:"
+    line = f"• Tham khảo hiện tại tại {location}:"
     detail_bits: list[str] = []
     if description:
         detail_bits.append(description)
     if isinstance(temp, (int, float)):
         detail_bits.append(f"{float(temp):.1f}°C")
     if isinstance(wind, (int, float)):
-        detail_bits.append(f"gio ~{float(wind):.0f} km/h")
+        detail_bits.append(f"gió ~{float(wind):.0f} km/h")
     if detail_bits:
         line += " " + ", ".join(detail_bits) + "."
     out = [line]
@@ -399,12 +416,30 @@ def _format_weather_lines(
         fastest = str(mobility_plan.get("fastest_mode_label") or "").strip()
         eta = mobility_plan.get("avg_eta_min")
         if fastest:
-            note = f"- Theo phan tich di chuyen, phuong an nhanh nhat hien tai la {fastest}"
+            note = f"• Theo phân tích di chuyển, phương án nhanh nhất hiện tại là {fastest}"
             if isinstance(eta, (int, float)):
-                note += f" voi ETA trung binh khoang {int(round(float(eta)))} phut."
+                note += f" với ETA trung bình khoảng {int(round(float(eta)))} phút."
+            else:
+                note += "."
             out.append(note)
-    out.append("- Neu ban thay doi ngay di, minh nen cap nhat lai du bao thoi tiet de tinh chinh lich.")
+    out.append("• Nếu bạn thay đổi ngày đi, mình sẽ cập nhật lại dự báo thời tiết để tinh chỉnh lịch.")
     return out
+
+
+def _is_day_header(line: str) -> bool:
+    return bool(re.match(r"^(NGAY|Ngày)\s+\d+", line, flags=re.IGNORECASE))
+
+
+def _format_day_header(line: str) -> str:
+    """Normalise legacy 'NGAY 1 - THEME' and new 'Ngày 1 — Theme' headers."""
+    match = re.match(r"^(?:NGAY|Ngày)\s+(\d+)\s*[-—:]?\s*(.*)$", line, flags=re.IGNORECASE)
+    if not match:
+        return line
+    day = match.group(1)
+    theme = (match.group(2) or "").strip()
+    if theme:
+        return f"▸ Ngày {day} — {theme}"
+    return f"▸ Ngày {day}"
 
 
 def _render_day_block(title: str, lines: list[str]) -> str:
@@ -417,44 +452,62 @@ def _clean_user_facing_line(line: str) -> str:
     text = str(line or "").strip()
     if not text:
         return ""
-    if re.match(r"^[-•]?\s*ly do phu hop:", text, flags=re.IGNORECASE):
+    if re.match(r"^[-•]?\s*(ly do phu hop|lý do phù hợp):", text, flags=re.IGNORECASE):
         return ""
-    if re.match(r"^(?:tom tat|thong tin) di chuyen:\s*$", text, flags=re.IGNORECASE):
+    if re.match(r"^(?:tom tat|thong tin|tóm tắt|thông tin)\s+di\s*chuy[eê]n:\s*$", text, flags=re.IGNORECASE):
         return ""
     if re.match(r"^[-•]?\s*chang\s+\d+\s*:", text, flags=re.IGNORECASE):
         return ""
+    if re.match(r"^[-•]?\s*chặng\s+\d+\s*:", text, flags=re.IGNORECASE):
+        return ""
+    if re.match(r"^[-•]?\s*Link\s*chặng:", text, flags=re.IGNORECASE):
+        return ""
     if re.match(r"^[-•]?\s*Link chặng:", text, flags=re.IGNORECASE):
         return ""
-    if re.match(r"^[-•]?\s*Nghi dem\s*:", text, flags=re.IGNORECASE):
+    if re.match(r"^[-•]?\s*(Nghi dem|Nghỉ đêm)\s*:", text, flags=re.IGNORECASE):
         return ""
 
     if text.startswith("• Ban do tuyen ngay:"):
         return ""
+    if text.startswith("• Bản đồ tuyến ngày:"):
+        return ""
     if text.startswith("• Thu tu diem:"):
+        return ""
+    if text.startswith("• Thứ tự điểm:"):
         return ""
     if re.match(r"^(?:[-•]+\s*)?Link chặng:\s*https?://\S+$", text, flags=re.IGNORECASE):
         return ""
+    if re.match(r"^(?:[-•]+\s*)?Link\s*chặng:\s*https?://\S+$", text, flags=re.IGNORECASE):
+        return ""
     if "->" in text and "http" in text and not re.search(r"\b(?:km|phut)\b", text, flags=re.IGNORECASE):
         return ""
-    if text == "Map tung chang:":
+    if (
+        "->" in text
+        and "http" in text
+        and not re.search(r"\b(?:km|phut|phút)\b", text, flags=re.IGNORECASE)
+    ):
+        return ""
+    if text == "Map tung chang:" or text == "Bản đồ từng chặng:":
         return ""
 
     text = re.sub(
-        r"\s*—\s*Nguon:\s*.*?(?=(?:\s*—\s*(?:Ly do chon|Map):)|(?:\.\s+Hanh dong:)|(?:\.\s+Link chặng:)|(?:\.\s*$)|$)",
+        r"\s*—\s*(?:Nguon|Nguồn):\s*.*?(?=(?:\s*—\s*(?:Ly do chon|Lý do chọn|Map|Bản đồ):)|(?:\.\s+(?:Hanh dong|Hoạt động):)|(?:\.\s+Link\s*chặng:)|(?:\.\s*$)|$)",
         "",
         text,
+        flags=re.IGNORECASE,
     )
     text = re.sub(
-        r"\s*—\s*Ly do chon:\s*.*?(?=(?:\s*—\s*Map:)|(?:\.\s+Hanh dong:)|(?:\.\s+Link chặng:)|(?:\.\s*$)|$)",
+        r"\s*—\s*(?:Ly do chon|Lý do chọn):\s*.*?(?=(?:\s*—\s*(?:Map|Bản đồ):)|(?:\.\s+(?:Hanh dong|Hoạt động):)|(?:\.\s+Link\s*chặng:)|(?:\.\s*$)|$)",
         "",
         text,
+        flags=re.IGNORECASE,
     )
     text = re.sub(r"\s*\((?:nguon map|nguồn map):\s*[^)]+\)", "", text, flags=re.IGNORECASE)
     text = re.sub(r"\s*-\s*destination\b", "", text, flags=re.IGNORECASE)
     text = re.sub(r"\(\s*,\s*", "(", text)
     text = re.sub(r",\s*,+", ", ", text)
     text = re.sub(r"\(\s*\)", "", text)
-    text = re.sub(r"\s*—\s*Map:\s*(https?://\S+)", r" — Map: \1", text)
+    text = re.sub(r"\s*—\s*(?:Map|Bản đồ):\s*(https?://\S+)", r" — Bản đồ: \1", text)
     text = text.replace(" . ", ". ")
     text = re.sub(r"\s{2,}", " ", text).strip()
     return text
@@ -464,8 +517,8 @@ def _merge_unique_lines(lines: list[str]) -> list[str]:
     out: list[str] = []
     seen: set[str] = set()
     for raw_line in lines:
-        line = _dashify(raw_line)
-        normalized = line.lstrip("- ").strip().lower()
+        line = _bulletify(raw_line)
+        normalized = line.lstrip("•- ").strip().lower()
         if not normalized or normalized in seen:
             continue
         seen.add(normalized)
@@ -473,22 +526,22 @@ def _merge_unique_lines(lines: list[str]) -> list[str]:
     return out
 
 
-def _dashify(line: str) -> str:
+def _bulletify(line: str) -> str:
     text = str(line or "").strip()
     if not text:
         return ""
-    if text.startswith("- "):
-        return text
     if text.startswith("• "):
-        return "- " + text[2:].strip()
+        return text
+    if text.startswith("- "):
+        return "• " + text[2:].strip()
     if text.startswith("□ "):
-        return "- " + text[2:].strip()
-    return "- " + text
+        return "• " + text[2:].strip()
+    return "• " + text
 
 
 def _days_compact_label(days: Any) -> str:
     if not isinstance(days, list) or not days:
-        return "lich chua xac dinh ngay"
+        return "Ngày chưa xác định"
     if len(days) == 1:
-        return f"Ngay {days[0]}"
-    return f"Ngay {days[0]}-{days[-1]}"
+        return f"Ngày {days[0]}"
+    return f"Ngày {days[0]}–{days[-1]}"

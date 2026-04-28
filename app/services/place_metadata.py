@@ -58,6 +58,11 @@ _INTENT_ORDER = (
     "dem",
     "gia_dinh",
 )
+_DISALLOWED_PLACE_NAME_SCRIPT_RE = re.compile(r"[\u3040-\u30ff\u3400-\u9fff\uac00-\ud7af]")
+_PLACE_NAME_PLACEHOLDER_RE = re.compile(
+    r"\b(?:last\s+(?:breakfast|lunch|dinner|meal)|final\s+(?:breakfast|lunch|dinner|meal))\b",
+    flags=re.IGNORECASE,
+)
 
 
 def fold_text(text: str) -> str:
@@ -79,6 +84,17 @@ def normalize_address_text(text: str) -> str:
     normalized = re.sub(r",\s*,+", ", ", normalized)
     normalized = re.sub(r"\(\s*\)", "", normalized)
     return normalized.strip(" ,")
+
+
+def is_user_facing_place_name(name: str) -> bool:
+    text = str(name or "").strip()
+    if not text:
+        return False
+    if _DISALLOWED_PLACE_NAME_SCRIPT_RE.search(text):
+        return False
+    if _PLACE_NAME_PLACEHOLDER_RE.search(fold_text(text)):
+        return False
+    return True
 
 
 def city_key_from_text(text: str) -> str:

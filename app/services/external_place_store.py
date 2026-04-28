@@ -4,7 +4,7 @@ import json
 from pathlib import Path
 from typing import Any
 
-from app.services.place_metadata import enrich_place_record
+from app.services.place_metadata import enrich_place_record, is_user_facing_place_name
 
 ROOT = Path(__file__).resolve().parents[2]
 CACHE_DIR = ROOT / "data" / "cache"
@@ -21,7 +21,10 @@ def load_external_places() -> list[dict[str, Any]]:
         return []
     if not isinstance(payload, list):
         return []
-    return [item for item in payload if isinstance(item, dict)]
+    return [
+        item for item in payload
+        if isinstance(item, dict) and is_user_facing_place_name(str(item.get("name") or ""))
+    ]
 
 
 def cache_external_places(places: list[dict[str, Any]]) -> int:
@@ -75,6 +78,8 @@ def _normalize_external_place(place: dict[str, Any]) -> dict[str, Any] | None:
     category = str(place.get("category") or "").strip().lower()
     address = str(place.get("address") or "").strip()
     if not name or not category:
+        return None
+    if not is_user_facing_place_name(name):
         return None
 
     record: dict[str, Any] = {

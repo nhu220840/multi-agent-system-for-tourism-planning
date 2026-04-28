@@ -11,7 +11,7 @@ from typing import Any, Iterable
 from app.config.settings import get_settings
 from app.services.external_place_store import load_external_places
 from app.services.place_repository import list_place_chunks, load_places_lookup
-from app.services.place_metadata import enrich_place_record, fold_text
+from app.services.place_metadata import enrich_place_record, fold_text, is_user_facing_place_name
 
 ROOT = Path(__file__).resolve().parents[2]
 RAG_JSON = ROOT / "data" / "rag" / "rag_documents.json"
@@ -496,7 +496,10 @@ def _load_rag_documents() -> list[dict[str, Any]]:
         return []
     if not isinstance(payload, list):
         return []
-    return [item for item in payload if isinstance(item, dict)]
+    return [
+        item for item in payload
+        if isinstance(item, dict) and is_user_facing_place_name(str(item.get("title") or item.get("name") or ""))
+    ]
 
 
 @lru_cache(maxsize=1)

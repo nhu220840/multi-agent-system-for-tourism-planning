@@ -14,6 +14,7 @@ from app.services.route_utils import (
 )
 from app.services.external_place_store import cache_external_places
 from app.services.place_metadata import fold_text as _fold
+from app.services.place_metadata import is_user_facing_place_name
 from app.services.query_utils import extract_trip_days
 from app.tools.trackasia_tool import GeoPoint, configured_route_modes, estimate_route
 from app.tools.nominatim_tool import search_places
@@ -302,7 +303,10 @@ def _filter_by_categories(places: List[dict], categories: List[str]) -> List[dic
 def _place_key(p: dict | None) -> str:
     if not p:
         return ""
-    return str(p.get("name") or "").strip().lower()
+    name = str(p.get("name") or "").strip()
+    if not is_user_facing_place_name(name):
+        return ""
+    return name.lower()
 
 
 def _unique_by_name(items: List[dict]) -> List[dict]:
@@ -1836,7 +1840,7 @@ def _query_external_restaurants(
     seen = set(used_names)
     for r in raw:
         name = str(r.get("name") or "").strip()
-        if not name:
+        if not name or not _is_usable_external_restaurant_name(name):
             continue
         key = name.lower()
         if key in seen:
@@ -1991,7 +1995,7 @@ def _query_external_food_emergency(
             continue
         for r in raw:
             name = str(r.get("name") or "").strip()
-            if not name:
+            if not name or not _is_usable_external_restaurant_name(name):
                 continue
             key = name.lower()
             if key in seen:
@@ -2117,6 +2121,15 @@ def _is_restaurant_within_anchor_radius(p: dict, anchor: dict | None, max_km: fl
     if p_areas and a_areas:
         return bool(p_areas.intersection(a_areas))
     return False
+
+
+def _is_usable_external_restaurant_name(name: str) -> bool:
+    if not is_user_facing_place_name(name):
+        return False
+    folded = _fold(name)
+    if folded in {"restaurant", "restaurants", "food", "cafe", "quan an", "nha hang"}:
+        return False
+    return True
 
 
 def _distance_to_route_segment_km(p: dict, a: dict | None, b: dict | None) -> float | None:
@@ -2360,6 +2373,8 @@ def _build_route_leg(
         "leg_label": leg_label,
         "from": from_name,
         "to": to_name,
+        "from_address": str(origin.get("address") or "").strip(),
+        "to_address": str(destination.get("address") or "").strip(),
         "segment_map_url": _segment_map_url(origin, destination),
     }
 
