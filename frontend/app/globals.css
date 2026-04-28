@@ -193,9 +193,24 @@ textarea {
   transition: transform 180ms ease, background 180ms ease;
 }
 
+.ghost-button:disabled,
+.conversation-delete:disabled,
+.conversation-select:disabled {
+  cursor: not-allowed;
+  opacity: 0.58;
+  transform: none;
+}
+
+.ghost-button-danger {
+  background: rgba(140, 33, 33, 0.08);
+  color: #8c2121;
+}
+
 .ghost-button:hover,
 .submit-button:hover,
-.conversation-item:hover {
+.conversation-item:hover,
+.conversation-select:hover,
+.conversation-delete:hover {
   transform: translateY(-1px);
 }
 
@@ -241,16 +256,45 @@ textarea {
 
 .conversation-item {
   text-align: left;
-  padding: 16px;
   display: flex;
-  flex-direction: column;
-  gap: 8px;
+  align-items: stretch;
+  gap: 10px;
   transition: border-color 180ms ease, background 180ms ease, transform 180ms ease;
+  padding: 12px;
 }
 
 .conversation-item.is-active {
   border-color: rgba(177, 77, 45, 0.42);
   background: rgba(255, 239, 223, 0.95);
+}
+
+.conversation-select {
+  flex: 1 1 auto;
+  border: 0;
+  background: transparent;
+  padding: 4px;
+  text-align: left;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  cursor: pointer;
+}
+
+.conversation-delete {
+  align-self: flex-start;
+  border: 0;
+  border-radius: 14px;
+  background: rgba(140, 33, 33, 0.09);
+  color: #8c2121;
+  padding: 9px 12px;
+  font-size: 0.84rem;
+  font-weight: 700;
+  cursor: pointer;
+  transition: transform 180ms ease, background 180ms ease;
+}
+
+.conversation-delete:hover {
+  background: rgba(140, 33, 33, 0.16);
 }
 
 .conversation-title {

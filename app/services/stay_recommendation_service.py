@@ -235,6 +235,7 @@ Trả về JSON hợp lệ theo schema:
     client = OpenAI(
         base_url=settings.openrouter_base_url,
         api_key=openrouter_key,
+        timeout=max(1, int(settings.openrouter_request_timeout_s or 25)),
     )
     transient = (APIConnectionError, APITimeoutError, InternalServerError, RateLimitError)
     kwargs = {

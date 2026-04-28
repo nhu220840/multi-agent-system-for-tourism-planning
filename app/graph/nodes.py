@@ -182,13 +182,17 @@ def planning_node(state: TravelGraphState) -> dict[str, Any]:
         local_candidates_considered=local_candidates_considered,
     )
     timings["planning_sources_ms"] = round((perf_counter() - step_started) * 1000, 1)
-    step_started = perf_counter()
-    answer = grounded_answer_tool(
-        query=rag_query,
-        context=context,
-        verified_places=source_artifacts.verified_places,
-    )
-    timings["planning_answer_ms"] = round((perf_counter() - step_started) * 1000, 1)
+    answer = ""
+    if not _should_generate_plan(state):
+        step_started = perf_counter()
+        answer = grounded_answer_tool(
+            query=rag_query,
+            context=context,
+            verified_places=source_artifacts.verified_places,
+        )
+        timings["planning_answer_ms"] = round((perf_counter() - step_started) * 1000, 1)
+    else:
+        timings["planning_answer_ms"] = 0.0
     timings["planning_total_ms"] = round((perf_counter() - total_started) * 1000, 1)
 
     return {
@@ -305,31 +309,36 @@ def clarify_response_node(state: TravelGraphState) -> dict[str, Any]:
 def response_node(state: TravelGraphState) -> dict[str, Any]:
     started = perf_counter()
     timings = _copy_timings(state)
-    follow_up_questions = [
-        build_time_confirmation_question(
-            str((state.get("collected_info") or {}).get("destination") or "")
+    if _should_generate_plan(state):
+        follow_up_questions = [
+            build_time_confirmation_question(
+                str((state.get("collected_info") or {}).get("destination") or "")
+            )
+        ]
+        stay_recommendations = build_stay_recommendations(
+            query=state.get("rag_query", state.get("message", "")),
+            places=state.get("places", []),
+            recommended_hotel=state.get("recommended_hotel"),
         )
-    ]
-    stay_recommendations = build_stay_recommendations(
-        query=state.get("rag_query", state.get("message", "")),
-        places=state.get("places", []),
-        recommended_hotel=state.get("recommended_hotel"),
-    )
-    formatted_answer = format_planning_answer(
-        query=state.get("rag_query", state.get("message", "")),
-        collected_info=state.get("collected_info"),
-        research=state.get("research"),
-        plan=state.get("plan"),
-        coordinator_plan=state.get("coordinator_plan"),
-        weather=state.get("weather"),
-        transport=state.get("transport"),
-        recommended_hotel=state.get("recommended_hotel"),
-        mobility_plan=state.get("mobility_plan"),
-        stay_plan=state.get("stay_plan"),
-        stay_recommendations=stay_recommendations,
-        plan_validation=state.get("plan_validation"),
-        verified_places=state.get("verified_places"),
-    )
+        formatted_answer = format_planning_answer(
+            query=state.get("rag_query", state.get("message", "")),
+            collected_info=state.get("collected_info"),
+            research=state.get("research"),
+            plan=state.get("plan"),
+            coordinator_plan=state.get("coordinator_plan"),
+            weather=state.get("weather"),
+            transport=state.get("transport"),
+            recommended_hotel=state.get("recommended_hotel"),
+            mobility_plan=state.get("mobility_plan"),
+            stay_plan=state.get("stay_plan"),
+            stay_recommendations=stay_recommendations,
+            plan_validation=state.get("plan_validation"),
+            verified_places=state.get("verified_places"),
+        )
+    else:
+        follow_up_questions = []
+        stay_recommendations = None
+        formatted_answer = str(state.get("answer") or "").strip()
     trace = _append_trace(state, "response_service")
     timings["response_ms"] = round((perf_counter() - started) * 1000, 1)
     response_payload = {

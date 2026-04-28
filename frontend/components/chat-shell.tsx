@@ -1,6 +1,6 @@
 "use client";
 
-import { FormEvent, ReactNode, useEffect, useRef, useState } from "react";
+import { FormEvent, MouseEvent, ReactNode, useEffect, useRef, useState } from "react";
 
 import {
   type ChatResponse,
@@ -8,6 +8,8 @@ import {
   type ConversationSummary,
   type DebugStep,
   type Principal,
+  deleteAllConversations,
+  deleteConversation,
   getConversation,
   initSession,
   listConversations,
@@ -994,6 +996,7 @@ export function ChatShell() {
   const [status, setStatus] = useState("Connecting to FastAPI...");
   const [error, setError] = useState<string | null>(null);
   const [clockMs, setClockMs] = useState(() => Date.now());
+  const [conversationMutationPending, setConversationMutationPending] = useState(false);
   const activeConversationKeyRef = useRef<string | null>(null);
 
   useEffect(() => {
@@ -1103,6 +1106,19 @@ export function ChatShell() {
     return items;
   }
 
+  async function focusConversationAfterRemoval(items: ConversationListItem[]) {
+    const nextActive = items[0] ?? null;
+    setActiveConversationKey(nextActive?.key ?? null);
+    if (!nextActive) {
+      return;
+    }
+    const localState = conversationStates[nextActive.key];
+    if (localState?.messages.length || localState?.pendingStartedAt != null || !nextActive.conversationId) {
+      return;
+    }
+    await loadConversationIntoState(nextActive.key, nextActive.conversationId);
+  }
+
   async function loadConversationIntoState(key: string, conversationId: string) {
     const detail = await getConversation(conversationId);
     const signals = extractConversationSignals(detail);
@@ -1173,6 +1189,77 @@ export function ChatShell() {
     } catch (loadError) {
       setError(loadError instanceof Error ? loadError.message : "Conversation load failed.");
       setStatus("Conversation load failed");
+    }
+  }
+
+  async function handleDeleteConversation(item: ConversationListItem, event: MouseEvent<HTMLButtonElement>) {
+    event.stopPropagation();
+    if (conversationMutationPending) {
+      return;
+    }
+    const label = item.title === "New conversation" ? "this conversation" : `"${item.title}"`;
+    if (!window.confirm(`Delete ${label}?`)) {
+      return;
+    }
+
+    setConversationMutationPending(true);
+    setError(null);
+    setStatus("Deleting conversation...");
+
+    try {
+      let nextServerItems = serverConversations;
+      const nextDraftItems = draftConversations.filter((draftItem) => draftItem.key !== item.key);
+
+      if (item.conversationId) {
+        await deleteConversation(item.conversationId);
+        const refreshed = await refreshServerConversations();
+        nextServerItems = refreshed.map(toConversationListItem);
+      }
+
+      setDraftConversations(nextDraftItems);
+      setConversationStates((current) => {
+        const updated = { ...current };
+        delete updated[item.key];
+        return updated;
+      });
+
+      const nextItems = [...nextDraftItems, ...nextServerItems].filter((conversation) => conversation.key !== item.key);
+      if (activeConversationKeyRef.current === item.key) {
+        await focusConversationAfterRemoval(nextItems);
+      }
+      setStatus(nextItems.length ? "Conversation deleted" : "Conversation history cleared");
+    } catch (deleteError) {
+      setError(deleteError instanceof Error ? deleteError.message : "Conversation delete failed.");
+      setStatus("Conversation delete failed");
+    } finally {
+      setConversationMutationPending(false);
+    }
+  }
+
+  async function handleDeleteAllConversations() {
+    if (conversationMutationPending) {
+      return;
+    }
+    if (!window.confirm("Delete all saved conversation history?")) {
+      return;
+    }
+
+    setConversationMutationPending(true);
+    setError(null);
+    setStatus("Clearing conversation history...");
+
+    try {
+      await deleteAllConversations();
+      setServerConversations([]);
+      setDraftConversations([]);
+      setConversationStates({});
+      setActiveConversationKey(null);
+      setStatus("Conversation history cleared");
+    } catch (deleteError) {
+      setError(deleteError instanceof Error ? deleteError.message : "Conversation reset failed.");
+      setStatus("Conversation reset failed");
+    } finally {
+      setConversationMutationPending(false);
     }
   }
 
@@ -1324,6 +1411,7 @@ export function ChatShell() {
           <button
             className="ghost-button"
             type="button"
+            disabled={conversationMutationPending}
             onClick={() => {
               const key = createDraftConversation();
               setActiveConversationKey(key);
@@ -1334,23 +1422,46 @@ export function ChatShell() {
             Start new chat
           </button>
 
+          <button
+            className="ghost-button ghost-button-danger"
+            type="button"
+            disabled={conversationMutationPending || conversationItems.length === 0}
+            onClick={handleDeleteAllConversations}
+          >
+            Clear all history
+          </button>
+
           <div className="conversation-list">
             {conversationItems.length === 0 ? (
               <div className="empty-card">No saved conversations yet.</div>
             ) : (
               conversationItems.map((conversation) => (
-                <button
+                <div
                   key={conversation.key}
-                  type="button"
                   className={`conversation-item${conversation.key === activeConversationKey ? " is-active" : ""}`}
-                  onClick={() => handleConversationSelect(conversation.key)}
                 >
-                  <span className="conversation-title">{conversation.title}</span>
-                  <span className="conversation-meta">{formatRelativeLabel(conversation.updated_at)}</span>
-                  <span className="conversation-preview">
-                    {conversation.latest_message_preview || "No preview yet"}
-                  </span>
-                </button>
+                  <button
+                    type="button"
+                    className="conversation-select"
+                    onClick={() => handleConversationSelect(conversation.key)}
+                  >
+                    <span className="conversation-title">{conversation.title}</span>
+                    <span className="conversation-meta">{formatRelativeLabel(conversation.updated_at)}</span>
+                    <span className="conversation-preview">
+                      {conversation.latest_message_preview || "No preview yet"}
+                    </span>
+                  </button>
+                  <button
+                    type="button"
+                    className="conversation-delete"
+                    disabled={conversationMutationPending}
+                    onClick={(event) => handleDeleteConversation(conversation, event)}
+                    aria-label={`Delete ${conversation.title}`}
+                    title="Delete conversation"
+                  >
+                    Delete
+                  </button>
+                </div>
               ))
             )}
           </div>

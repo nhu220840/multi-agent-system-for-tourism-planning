@@ -48,6 +48,7 @@ def generate_answer(
     client = OpenAI(
         base_url=settings.openrouter_base_url,
         api_key=openrouter_key,
+        timeout=max(1, int(settings.openrouter_request_timeout_s or 25)),
     )
     model = settings.openrouter_model
     extra_body = {"reasoning": {"enabled": bool(settings.openrouter_reasoning_enabled)}}
