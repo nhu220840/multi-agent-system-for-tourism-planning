@@ -97,6 +97,17 @@ export async function getConversation(conversationId: string): Promise<Conversat
   return parseJson<ConversationDetail>(response, "Conversation lookup failed");
 }
 
+export async function deleteConversation(conversationId: string): Promise<void> {
+  const response = await fetch(`${API_BASE}/conversations/${conversationId}`, {
+    method: "DELETE",
+    credentials: "include",
+  });
+
+  if (!response.ok) {
+    throw new Error(`Conversation delete failed: ${response.status}`);
+  }
+}
+
 export async function sendChat(message: string, conversationId?: string): Promise<ChatResponse> {
   await initSession();
 

@@ -141,6 +141,29 @@ class ConversationService:
             messages=messages,
         )
 
+    def delete_conversation(self, principal_id: str, conversation_id: str) -> bool:
+        summary = self._fetch_conversation_summary(principal_id, conversation_id)
+        if not summary:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Conversation not found for current principal.",
+            )
+
+        with get_cursor(commit=True) as cursor:
+            cursor.execute(
+                "DELETE FROM plans WHERE conversation_id = %s AND principal_id = %s",
+                (conversation_id, principal_id),
+            )
+            cursor.execute(
+                "DELETE FROM messages WHERE conversation_id = %s",
+                (conversation_id,),
+            )
+            cursor.execute(
+                "DELETE FROM conversations WHERE id = %s AND principal_id = %s",
+                (conversation_id, principal_id),
+            )
+        return True
+
     def build_effective_user_message(
         self,
         *,

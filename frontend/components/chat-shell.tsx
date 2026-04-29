@@ -1,6 +1,6 @@
 "use client";
 
-import { FormEvent, ReactNode, useEffect, useRef, useState } from "react";
+import { FormEvent, KeyboardEvent, MouseEvent, ReactNode, useEffect, useRef, useState } from "react";
 
 import {
   type ChatResponse,
@@ -8,6 +8,7 @@ import {
   type ConversationSummary,
   type DebugStep,
   type Principal,
+  deleteConversation,
   getConversation,
   initSession,
   listConversations,
@@ -328,7 +329,7 @@ function truncateMiddle(value: string, maxLength = 48): string {
 function linkLabelForLine(url: string, line: string, index: number): string {
   const lower = line.toLowerCase();
   if (url.includes("/routes/") && url.includes("maps.track-asia.com")) {
-    return "Chi duong";
+    return "Chỉ đường";
   }
   if (lower.includes("ban do tuyen ngay")) {
     return index > 0 ? `Mo tuyen ${index + 1}` : "Mo tuyen";
@@ -343,14 +344,14 @@ function linkLabelForLine(url: string, line: string, index: number): string {
     return "Xem map";
   }
   if (lower.includes("directions")) {
-    return "Chi duong";
+    return "Chỉ đường";
   }
 
   try {
     const parsed = new URL(url);
     const host = parsed.hostname.replace(/^www\./, "");
     if (host.includes("track-asia.com")) {
-      return url.includes("/routes/") ? "Chi duong" : "Xem map";
+      return url.includes("/routes/") ? "Chỉ đường" : "Xem map";
     }
     if (host.includes("openstreetmap")) {
       return "OpenStreetMap";
@@ -364,6 +365,9 @@ function linkLabelForLine(url: string, line: string, index: number): string {
 function cleanDisplayLine(line: string): string {
   let text = line.trim();
   if (!text) {
+    return "";
+  }
+  if (/^[─—-]{5,}$/.test(text)) {
     return "";
   }
 
@@ -404,7 +408,50 @@ function cleanDisplayLine(line: string): string {
   text = text.replace(/\(\s*\)/g, "");
   text = text.replace(" . ", ". ");
   text = text.replace(/\s{2,}/g, " ").trim();
-  return text;
+  return normalizeVietnameseDisplay(text);
+}
+
+function normalizeVietnameseDisplay(text: string): string {
+  let out = text;
+  const replacements: Array<[RegExp, string]> = [
+    [/\bKE HOACH DU LICH GOI Y\b/gi, "KẾ HOẠCH DU LỊCH GỢI Ý"],
+    [/\bTOM TAT NHANH\b/gi, "TÓM TẮT NHANH"],
+    [/\bTHOI TIET\s*&\s*THOI DIEM\b/gi, "THỜI TIẾT & THỜI ĐIỂM"],
+    [/\bDIEM NHAN HANH TRINH\b/gi, "ĐIỂM NHẤN HÀNH TRÌNH"],
+    [/\bNOI LUU TRU DE XUAT\b/gi, "NƠI LƯU TRÚ ĐỀ XUẤT"],
+    [/\bLICH TRINH CHI TIET\b/gi, "LỊCH TRÌNH CHI TIẾT"],
+    [/\bDI CHUYEN GOI Y\b/gi, "DI CHUYỂN GỢI Ý"],
+    [/\bMEO\s*&\s*LUU Y\b/gi, "MẸO & LƯU Ý"],
+    [/\bBUOC TIEP THEO\b/gi, "BƯỚC TIẾP THEO"],
+    [/\bDa Nang\b/gi, "Đà Nẵng"],
+    [/\bHoi An\b/gi, "Hội An"],
+    [/\bQuang Nam\b/gi, "Quảng Nam"],
+    [/\bHanh trinh:/gi, "Hành trình:"],
+    [/\bNgay\b/gi, "Ngày"],
+    [/\bChang di\b/gi, "Chặng đi"],
+    [/\bChi duong\b/gi, "Chỉ đường"],
+    [/\bHanh dong\b/gi, "Hoạt động"],
+    [/\bSang:/gi, "Sáng:"],
+    [/\bTrua:/gi, "Trưa:"],
+    [/\bChieu:/gi, "Chiều:"],
+    [/\bToi:/gi, "Tối:"],
+    [/\bdiem den\b/gi, "điểm đến"],
+    [/\bhanh trinh\b/gi, "hành trình"],
+    [/\btrai nghiem\b/gi, "trải nghiệm"],
+    [/\btham quan\b/gi, "tham quan"],
+    [/\bam thuc\b/gi, "ẩm thực"],
+    [/\bvan hoa\b/gi, "văn hoá"],
+    [/\btham khao\b/gi, "tham khảo"],
+    [/\bthoi tiet\b/gi, "thời tiết"],
+    [/\bcu the\b/gi, "cụ thể"],
+    [/\bdoi chieu\b/gi, "đối chiếu"],
+    [/\bcan mang theo gi\b/gi, "cần mang theo gì"],
+    [/\bde o khung\b/gi, "để ở khung"],
+  ];
+  replacements.forEach(([pattern, replacement]) => {
+    out = out.replace(pattern, replacement);
+  });
+  return out;
 }
 
 function splitActionClauses(text: string): string[] {
@@ -431,7 +478,7 @@ function expandDisplayLine(line: string): string[] {
   const linkUrl = linkMatch?.[1] || "";
   const withoutLink = cleanedLine.replace(/\.\s+Link chặng:\s*https?:\/\/\S+/i, "").trim();
 
-  const actionMatch = withoutLink.match(/^(.*?)(?:\.\s+Hanh dong:\s*)(.*)$/i);
+  const actionMatch = withoutLink.match(/^(.*?)(?:\.\s+(?:Hanh dong|Hoạt động):\s*)(.*)$/i);
   if (!actionMatch) {
     return linkUrl ? [withoutLink, `- Link chặng: ${linkUrl}`] : [withoutLink];
   }
@@ -445,7 +492,7 @@ function expandDisplayLine(line: string): string[] {
   }
 
   actions.forEach((action, index) => {
-    expanded.push(index === 0 ? `- Hanh dong: ${action}` : `- ${action}`);
+    expanded.push(index === 0 ? `- Hoạt động: ${action}` : `- ${action}`);
   });
 
   if (linkUrl) {
@@ -493,23 +540,24 @@ function renderInlineLinks(text: string): ReactNode[] {
 }
 
 function renderMessageLine(line: string, index: number): ReactNode {
-  const trimmed = line.trim();
+  const normalizedLine = normalizeVietnameseDisplay(line);
+  const trimmed = normalizedLine.trim();
 
   if (!trimmed) {
     return <div key={`empty-${index}`} className="message-spacer" aria-hidden="true" />;
   }
 
   let className = "message-line";
-  let displayLine = line;
-  if (/^KE HOACH DU LICH GOI Y/i.test(trimmed)) {
+  let displayLine = normalizedLine;
+  if (/^(KẾ HOẠCH DU LỊCH GỢI Ý|KE HOACH DU LICH GOI Y)/i.test(trimmed)) {
     className += " is-heading";
-  } else if (/^NGAY\s+\d+/i.test(trimmed)) {
+  } else if (/^Ngày\s+\d+/i.test(trimmed) || /^NGAY\s+\d+/i.test(trimmed)) {
     className += " is-day";
   } else if (trimmed.endsWith(":") && !trimmed.startsWith("http")) {
     className += " is-section";
-  } else if (/^•\s*(Sang|Trua|Chieu|Toi):/i.test(trimmed)) {
+  } else if (/^•\s*(Sáng|Trưa|Chiều|Tối|Sang|Trua|Chieu|Toi):/i.test(trimmed)) {
     className += " is-bullet level-1";
-  } else if (/^-\s*Hanh dong:/i.test(trimmed)) {
+  } else if (/^-\s*(Hoạt động|Hanh dong):/i.test(trimmed)) {
     className += " is-bullet level-2 is-action";
   } else if (/^-\s*Link chặng:/i.test(trimmed)) {
     className += " is-bullet level-3 is-link-row";
@@ -558,7 +606,7 @@ function extractPlaceNames(line: string): string[] {
 
 function summarizeSlotText(line: string, label: string): string {
   const names = extractPlaceNames(line);
-  if (names.length >= 2 && label === "Sang") {
+  if (names.length >= 2 && label === "Sáng") {
     return `${names[0]} -> ${names[1]}`;
   }
   if (names.length > 0) {
@@ -566,20 +614,25 @@ function summarizeSlotText(line: string, label: string): string {
   }
 
   const fallback = line
-    .replace(/^•\s*(Sang|Trua|Chieu|Toi):/i, "")
-    .replace(/Hanh dong:\s*/gi, "")
+    .replace(/^•\s*(Sáng|Trưa|Chiều|Tối|Sang|Trua|Chieu|Toi):/i, "")
+    .replace(/(?:Hoạt động|Hanh dong):\s*/gi, "")
     .replace(/\s+/g, " ")
     .trim();
 
-  return fallback.length > 96 ? `${fallback.slice(0, 93)}...` : fallback;
+  const normalized = normalizeVietnameseDisplay(fallback);
+  return normalized.length > 96 ? `${normalized.slice(0, 93)}...` : normalized;
 }
 
 function parseDaySlot(line: string): DaySlotSummary | null {
   const slots = [
-    { prefix: "• Sang:", label: "Sang" },
-    { prefix: "• Trua:", label: "Trua" },
-    { prefix: "• Chieu:", label: "Chieu" },
-    { prefix: "• Toi:", label: "Toi" },
+    { prefix: "• Sáng:", label: "Sáng" },
+    { prefix: "• Sang:", label: "Sáng" },
+    { prefix: "• Trưa:", label: "Trưa" },
+    { prefix: "• Trua:", label: "Trưa" },
+    { prefix: "• Chiều:", label: "Chiều" },
+    { prefix: "• Chieu:", label: "Chiều" },
+    { prefix: "• Tối:", label: "Tối" },
+    { prefix: "• Toi:", label: "Tối" },
   ];
 
   const matched = slots.find((slot) => line.startsWith(slot.prefix));
@@ -605,14 +658,14 @@ function parsePlanDays(planText: string): DaySummary[] {
       continue;
     }
 
-    const dayMatch = line.match(/^NGAY\s+(\d+)(?:\s*-\s*(.+))?/i);
+    const dayMatch = line.match(/^(?:NGAY|Ngày)\s+(\d+)(?:\s*[-—]\s*(.+))?/i);
     if (dayMatch) {
       if (currentDay) {
         days.push(currentDay);
       }
       currentDay = {
-        title: `Ngay ${dayMatch[1]}`,
-        theme: dayMatch[2]?.trim() || "",
+        title: `Ngày ${dayMatch[1]}`,
+        theme: normalizeVietnameseDisplay(dayMatch[2]?.trim() || ""),
         slots: [],
       };
       continue;
@@ -808,7 +861,7 @@ function classifyRouteMode(modeLabel: string, distanceKm: number | null): { tone
 }
 
 function extractDestinationFromAnswer(text: string): string {
-  const match = text.match(/KE HOACH DU LICH GOI Y\s*-\s*(.+)/i);
+  const match = text.match(/(?:KẾ HOẠCH DU LỊCH GỢI Ý|KE HOACH DU LICH GOI Y)\s*[—-]\s*(.+)/i);
   return match?.[1]?.trim() || "";
 }
 
@@ -848,7 +901,9 @@ function buildPlannerSnapshot(message: DraftMessage | null): PlannerSnapshot | n
     : null;
 
   return {
-    destination: readString(collectedInfo.destination) || extractDestinationFromAnswer(message.content) || "Chuyen di hien tai",
+    destination: normalizeVietnameseDisplay(
+      readString(collectedInfo.destination) || extractDestinationFromAnswer(message.content) || "Chuyến đi hiện tại",
+    ),
     daysLabel: formatDaysLabel(collectedInfo.days, daySummaries.length),
     hotelName: hotelInfo.hotelName,
     hotelMapUrl: hotelInfo.hotelMapUrl,
@@ -861,7 +916,7 @@ function buildPlannerSnapshot(message: DraftMessage | null): PlannerSnapshot | n
 }
 
 function dayNumberFromTitle(title: string): number | null {
-  const match = title.match(/\bNgay\s+(\d+)\b/i);
+  const match = title.match(/\b(?:Ngày|Ngay)\s+(\d+)\b/i);
   if (!match) {
     return null;
   }
@@ -895,22 +950,22 @@ function SummaryPanel({
       <aside className="summary-panel">
         <div className="summary-panel-head">
           <span className="summary-kicker">Quick tab</span>
-          <h3>Tom tat nhanh</h3>
-          <p>Khung nay se rut gon thong tin chinh tung ngay de de theo doi va nho nhanh.</p>
+          <h3>Tóm tắt nhanh</h3>
+          <p>Khung này sẽ rút gọn thông tin chính từng ngày để dễ theo dõi và nhớ nhanh.</p>
         </div>
 
         <div className="summary-empty">
-          <strong>{isPending ? "Dang tong hop lich trinh..." : "Chua co lich trinh de tom tat."}</strong>
+          <strong>{isPending ? "Đang tổng hợp lịch trình..." : "Chưa có lịch trình để tóm tắt."}</strong>
           <p>
             {isPending
-              ? "Khi planner xong, ben nay se hien thi ngay, dia diem chinh va link mo map ngan gon."
-              : "Gui them yeu cau ve diem den, so ngay hoac ngan sach de minh dien vao day."}
+              ? "Khi planner xong, bên này sẽ hiển thị ngày, địa điểm chính và link mở map ngắn gọn."
+              : "Gửi thêm yêu cầu về điểm đến, số ngày hoặc ngân sách để mình điền vào đây."}
           </p>
         </div>
 
         {nextPrompt ? (
           <div className="summary-note">
-            <span>Can bo sung</span>
+            <span>Cần bổ sung</span>
             <p>{nextPrompt}</p>
           </div>
         ) : null}
@@ -922,7 +977,7 @@ function SummaryPanel({
     <aside className="summary-panel">
       <div className="summary-panel-head">
         <span className="summary-kicker">Quick tab</span>
-        <h3>Tom tat nhanh</h3>
+        <h3>Tóm tắt nhanh</h3>
         <p>
           {snapshot.destination}
           {snapshot.daysLabel ? ` · ${snapshot.daysLabel}` : ""}
@@ -931,19 +986,19 @@ function SummaryPanel({
 
       {snapshot.stayRecommendations.length > 0 ? (
         <div className="summary-card">
-          <span className="summary-card-label">Luu tru</span>
+          <span className="summary-card-label">Lưu trú</span>
           <div className="summary-stays">
             {snapshot.stayRecommendations.slice(0, 2).map((stay) => (
               <div key={`${stay.segment}-${stay.name}`} className="summary-stay-item">
                 <strong>
                   {stay.segment}: {stay.name}
                 </strong>
-                {stay.priceNote ? <p>Gia: {stay.priceNote}</p> : null}
-                {stay.address ? <p>Dia chi: {stay.address}</p> : null}
-                {stay.whyFit ? <p>Phu hop: {stay.whyFit}</p> : null}
+                {stay.priceNote ? <p>Giá: {stay.priceNote}</p> : null}
+                {stay.address ? <p>Địa chỉ: {stay.address}</p> : null}
+                {stay.whyFit ? <p>Phù hợp: {stay.whyFit}</p> : null}
                 {stay.mapUrl ? (
                   <a className="summary-link" href={stay.mapUrl} target="_blank" rel="noreferrer">
-                    Mo map khach san
+                    Mở map khách sạn
                   </a>
                 ) : null}
               </div>
@@ -952,11 +1007,11 @@ function SummaryPanel({
         </div>
       ) : snapshot.hotelName ? (
         <div className="summary-card">
-          <span className="summary-card-label">Luu tru</span>
+          <span className="summary-card-label">Lưu trú</span>
           <strong>{snapshot.hotelName}</strong>
           {snapshot.hotelMapUrl ? (
             <a className="summary-link" href={snapshot.hotelMapUrl} target="_blank" rel="noreferrer">
-              Mo map khach san
+              Mở map khách sạn
             </a>
           ) : null}
         </div>
@@ -985,7 +1040,7 @@ function SummaryPanel({
 
       {snapshot.routeLegs.length > 0 ? (
         <section className="summary-route-block">
-          <span className="summary-card-label">Chi dan tung chang</span>
+          <span className="summary-card-label">Chỉ dẫn từng chặng</span>
           <div className="route-leg-list">
             {snapshot.routeLegs.map((leg, index) => (
               <article
@@ -993,19 +1048,12 @@ function SummaryPanel({
                 className="route-leg-item"
               >
                 <span className="route-leg-label">
-                  {leg.dayNumber ? `Ngay ${leg.dayNumber}` : "Chang di"}
+                  {leg.dayNumber ? `Ngày ${leg.dayNumber}` : "Chặng đi"}
                   {leg.legLabel ? ` · ${leg.legLabel}` : ""}
                 </span>
                 <strong>
                   {leg.from} {"->"} {leg.to}
                 </strong>
-                {leg.fromAddress || leg.toAddress ? (
-                  <p>
-                    {leg.fromAddress ? `Di: ${leg.fromAddress}` : ""}
-                    {leg.fromAddress && leg.toAddress ? " · " : ""}
-                    {leg.toAddress ? `Den: ${leg.toAddress}` : ""}
-                  </p>
-                ) : null}
                 <div className="route-leg-meta">
                   {leg.distanceKm ? <span className="route-leg-chip">{leg.distanceKm}</span> : null}
                   {leg.etaMin ? <span className="route-leg-chip">{leg.etaMin}</span> : null}
@@ -1013,7 +1061,7 @@ function SummaryPanel({
                 </div>
                 {leg.directionUrl ? (
                   <a className="summary-link" href={leg.directionUrl} target="_blank" rel="noreferrer">
-                    Chi duong
+                    Chỉ đường
                   </a>
                 ) : null}
               </article>
@@ -1024,7 +1072,7 @@ function SummaryPanel({
 
       {nextPrompt ? (
         <div className="summary-note">
-          <span>Nhac tiep theo</span>
+          <span>Nhắc tiếp theo</span>
           <p>{nextPrompt}</p>
         </div>
       ) : null}
@@ -1041,6 +1089,8 @@ export function ChatShell() {
   const [draft, setDraft] = useState("");
   const [status, setStatus] = useState("Connecting to FastAPI...");
   const [error, setError] = useState<string | null>(null);
+  const [historyClearing, setHistoryClearing] = useState(false);
+  const [deletingConversationKey, setDeletingConversationKey] = useState<string | null>(null);
   const [clockMs, setClockMs] = useState(() => Date.now());
   const activeConversationKeyRef = useRef<string | null>(null);
 
@@ -1224,6 +1274,85 @@ export function ChatShell() {
     }
   }
 
+  async function handleDeleteConversationItem(
+    item: ConversationListItem,
+    event: MouseEvent<HTMLButtonElement>,
+  ) {
+    event.stopPropagation();
+    if (historyClearing || activeIsPending || deletingConversationKey) {
+      return;
+    }
+    if (!window.confirm(`Xóa conversation "${item.title}"?`)) {
+      return;
+    }
+
+    setDeletingConversationKey(item.key);
+    setError(null);
+    setStatus("Đang xóa conversation...");
+    try {
+      if (item.conversationId) {
+        await deleteConversation(item.conversationId);
+      }
+      setServerConversations((current) => current.filter((conversation) => conversation.key !== item.key));
+      setDraftConversations((current) => current.filter((conversation) => conversation.key !== item.key));
+      setConversationStates((current) => {
+        const updated = { ...current };
+        delete updated[item.key];
+        return updated;
+      });
+      if (activeConversationKeyRef.current === item.key) {
+        setActiveConversationKey(null);
+      }
+      setStatus("Đã xóa conversation");
+    } catch (deleteError) {
+      setError(deleteError instanceof Error ? deleteError.message : "Không thể xóa conversation.");
+      setStatus("Xóa conversation thất bại");
+    } finally {
+      setDeletingConversationKey(null);
+    }
+  }
+
+  async function handleClearConversation() {
+    if (historyClearing || activeIsPending || deletingConversationKey) {
+      return;
+    }
+    const activeKey = activeConversationKeyRef.current;
+    if (!activeKey) {
+      return;
+    }
+    const activeItem = conversationItems.find((conversation) => conversation.key === activeKey);
+    if (!activeItem) {
+      return;
+    }
+    if (!window.confirm("Xóa conversation hiện tại?")) {
+      return;
+    }
+
+    setHistoryClearing(true);
+    setError(null);
+    setStatus("Đang xóa conversation hiện tại...");
+    try {
+      if (activeItem.conversationId) {
+        await deleteConversation(activeItem.conversationId);
+      }
+      setServerConversations((current) => current.filter((conversation) => conversation.key !== activeKey));
+      setDraftConversations((current) => current.filter((conversation) => conversation.key !== activeKey));
+      setConversationStates((current) => {
+        const updated = { ...current };
+        delete updated[activeKey];
+        return updated;
+      });
+      setActiveConversationKey(null);
+      setDraft("");
+      setStatus("Đã xóa conversation hiện tại");
+    } catch (clearError) {
+      setError(clearError instanceof Error ? clearError.message : "Không thể xóa conversation hiện tại.");
+      setStatus("Xóa conversation thất bại");
+    } finally {
+      setHistoryClearing(false);
+    }
+  }
+
   async function handleSubmit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     const content = draft.trim();
@@ -1322,8 +1451,14 @@ export function ChatShell() {
           [conversationKey]: {
             ...(current[conversationKey] ?? createConversationViewState(requestConversationId)),
             conversationId: requestConversationId,
-            messages: (current[conversationKey]?.messages || []).filter(
-              (message) => message.id !== optimisticId && message.id !== `${optimisticId}-assistant`,
+            messages: (current[conversationKey]?.messages || []).map((message) =>
+              message.id === `${optimisticId}-assistant`
+                ? {
+                    ...message,
+                    content: "Không thể kết nối tới backend. Vui lòng thử lại.",
+                    pending: false,
+                  }
+                : message,
             ),
             pendingStartedAt: null,
           },
@@ -1334,6 +1469,17 @@ export function ChatShell() {
         }
       }
     })();
+  }
+
+  function handleComposerKeyDown(event: KeyboardEvent<HTMLTextAreaElement>) {
+    if (event.key !== "Enter" || event.shiftKey) {
+      return;
+    }
+    event.preventDefault();
+    if (activeIsPending || historyClearing || !draft.trim()) {
+      return;
+    }
+    event.currentTarget.form?.requestSubmit();
   }
 
   const canShowEmptyState = !activeIsPending && messages.length === 0;
@@ -1387,18 +1533,30 @@ export function ChatShell() {
               <div className="empty-card">No saved conversations yet.</div>
             ) : (
               conversationItems.map((conversation) => (
-                <button
+                <div
                   key={conversation.key}
-                  type="button"
                   className={`conversation-item${conversation.key === activeConversationKey ? " is-active" : ""}`}
-                  onClick={() => handleConversationSelect(conversation.key)}
                 >
-                  <span className="conversation-title">{conversation.title}</span>
-                  <span className="conversation-meta">{formatRelativeLabel(conversation.updated_at)}</span>
-                  <span className="conversation-preview">
-                    {conversation.latest_message_preview || "No preview yet"}
-                  </span>
-                </button>
+                  <button
+                    type="button"
+                    className="conversation-select"
+                    onClick={() => handleConversationSelect(conversation.key)}
+                  >
+                    <span className="conversation-title">{conversation.title}</span>
+                    <span className="conversation-meta">{formatRelativeLabel(conversation.updated_at)}</span>
+                    <span className="conversation-preview">
+                      {conversation.latest_message_preview || "No preview yet"}
+                    </span>
+                  </button>
+                  <button
+                    type="button"
+                    className="conversation-delete"
+                    onClick={(event) => handleDeleteConversationItem(conversation, event)}
+                    disabled={historyClearing || activeIsPending || deletingConversationKey === conversation.key}
+                  >
+                    {deletingConversationKey === conversation.key ? "Deleting..." : "Delete"}
+                  </button>
+                </div>
               ))
             )}
           </div>
@@ -1410,6 +1568,14 @@ export function ChatShell() {
               <h2>Planner Console</h2>
               <p>Ask for an itinerary, then reuse the same conversation through the FastAPI session.</p>
             </div>
+            <button
+              className="secondary-button danger-button"
+              type="button"
+              onClick={handleClearConversation}
+              disabled={historyClearing || activeIsPending || deletingConversationKey != null || !activeConversationKey}
+            >
+              {historyClearing ? "Đang xóa..." : "Clear conversation"}
+            </button>
           </div>
 
           <div className="chat-body">
@@ -1519,12 +1685,27 @@ export function ChatShell() {
               placeholder="Describe the trip you want the planner to build..."
               value={draft}
               onChange={(event) => setDraft(event.target.value)}
+              onKeyDown={handleComposerKeyDown}
             />
             <div className="composer-actions">
-              {error ? <span className="error-text">{error}</span> : <span className="hint-text">Session is cookie-backed.</span>}
-              <button className="submit-button" type="submit" disabled={activeIsPending || !draft.trim()}>
+              {error ? (
+                <span className="error-text">{error}</span>
+              ) : (
+                <span className="hint-text">Nhấn Enter để gửi, Shift+Enter để xuống dòng.</span>
+              )}
+              <div className="composer-action-buttons">
+                <button
+                  className="secondary-button danger-button"
+                  type="button"
+                  onClick={handleClearConversation}
+                  disabled={historyClearing || activeIsPending || deletingConversationKey != null || !activeConversationKey}
+                >
+                  {historyClearing ? "Đang xóa..." : "Clear conversation"}
+                </button>
+                <button className="submit-button" type="submit" disabled={activeIsPending || historyClearing || !draft.trim()}>
                 {activeIsPending ? "Planning..." : "Send to FastAPI"}
-              </button>
+                </button>
+              </div>
             </div>
           </form>
         </section>

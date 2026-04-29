@@ -273,10 +273,34 @@ def build_trip_plan_payload(query: str, places: List[dict], strict_mode: bool = 
             [
                 "",
                 f"NGAY {day} - {day_theme}",
-                f"• Sang: An sang tai {_fmt(breakfast)}. Hanh dong: {morning_action} tai {_fmt(morning)}",
-                f"• Trua: An trua tai {_fmt(lunch)}",
-                f"• Chieu: Hanh dong: {afternoon_action} tai {_fmt(afternoon)}",
-                f"• Toi: An toi tai {_fmt(dinner)}. Hanh dong: {evening_action}; di dao/chill quanh khu vuc {_fmt(dinner)}",
+                _meal_and_activity_line(
+                    slot="Sang",
+                    meal_kind="breakfast",
+                    meal_place=breakfast,
+                    activity_text=morning_action,
+                    activity_place=morning,
+                ),
+                _meal_and_activity_line(
+                    slot="Trua",
+                    meal_kind="lunch",
+                    meal_place=lunch,
+                ),
+                _meal_and_activity_line(
+                    slot="Chieu",
+                    meal_kind="",
+                    meal_place=None,
+                    activity_text=afternoon_action,
+                    activity_place=afternoon,
+                ),
+                _meal_and_activity_line(
+                    slot="Toi",
+                    meal_kind="dinner",
+                    meal_place=dinner,
+                    activity_text=evening_action,
+                    activity_place=dinner,
+                    fallback_place=end_hotel or afternoon,
+                    include_evening_stroll=True,
+                ),
             ]
         )
 
@@ -307,6 +331,97 @@ def _place_key(p: dict | None) -> str:
     if not is_user_facing_place_name(name):
         return ""
     return name.lower()
+
+
+def _is_self_service_meal(place: dict | None) -> bool:
+    name = str((place or {}).get("name") or "").strip().lower()
+    return "tu tuc" in name or "tự túc" in name
+
+
+def _meal_and_activity_line(
+    *,
+    slot: str,
+    meal_kind: str,
+    meal_place: dict | None,
+    activity_text: str | None = None,
+    activity_place: dict | None = None,
+    fallback_place: dict | None = None,
+    include_evening_stroll: bool = False,
+) -> str:
+    parts: list[str] = []
+    if meal_kind:
+        meal_sentence = _meal_sentence(meal_kind=meal_kind, meal_place=meal_place)
+        if meal_sentence:
+            parts.append(meal_sentence)
+    activity_sentence = _activity_sentence(
+        slot=slot,
+        activity_text=activity_text,
+        activity_place=activity_place,
+        fallback_place=fallback_place,
+        include_evening_stroll=include_evening_stroll,
+    )
+    if activity_sentence:
+        parts.append(activity_sentence)
+    body = " ".join(part.strip() for part in parts if part.strip()).strip()
+    return f"• {slot}: {body}".strip()
+
+
+def _meal_sentence(meal_kind: str, meal_place: dict | None) -> str:
+    meal_map = {
+        "breakfast": ("bua sang", "An sang"),
+        "lunch": ("bua trua", "An trua"),
+        "dinner": ("bua toi", "An toi"),
+    }
+    meal_label, fallback_label = meal_map.get(meal_kind, ("bua an", "An uong"))
+    if _is_self_service_meal(meal_place):
+        return f"Tu tuc {meal_label} vi chua tim thay dia diem phu hop gan hanh trinh."
+
+    place_name = _fmt(meal_place) if meal_place else fallback_label
+    if meal_kind == "breakfast":
+        return f"Bat dau ngay moi voi bua sang tai {place_name}."
+    if meal_kind == "lunch":
+        return f"Dung bua trua tai {place_name}."
+    if meal_kind == "dinner":
+        return f"Dung bua toi tai {place_name}."
+    return f"Ghe {place_name} cho bua an trong ngay."
+
+
+def _activity_sentence(
+    *,
+    slot: str,
+    activity_text: str | None,
+    activity_place: dict | None,
+    fallback_place: dict | None = None,
+    include_evening_stroll: bool = False,
+) -> str:
+    action = str(activity_text or "").strip()
+    target = _fmt(activity_place or fallback_place) if (activity_place or fallback_place) else ""
+    if not action and not include_evening_stroll:
+        return ""
+
+    if slot == "Sang" and action and target:
+        return f"Sau do, ban co the {action} tai {target}."
+    if slot == "Chieu" and action and target:
+        return f"Buoi chieu phu hop de {action} tai {target}."
+    if slot == "Toi":
+        phrases: list[str] = []
+        if action and target:
+            phrases.append(f"Buoi toi, ban co the {action} tai {target}.")
+        elif action:
+            phrases.append(f"Buoi toi, ban co the {action}.")
+        if include_evening_stroll:
+            stroll_target = _fmt(fallback_place or activity_place) if (fallback_place or activity_place) else ""
+            if stroll_target and not _is_self_service_meal(fallback_place or activity_place):
+                phrases.append(f"Sau bua toi, danh it thoi gian di dao va thu gian quanh khu vuc {stroll_target}.")
+            else:
+                phrases.append("Sau bua toi, ban co the di dao nhe va thu gian quanh khu vuc luu tru.")
+        return " ".join(phrases).strip()
+
+    if action and target:
+        return f"Ban co the {action} tai {target}."
+    if action:
+        return f"Ban co the {action}."
+    return ""
 
 
 def _unique_by_name(items: List[dict]) -> List[dict]:

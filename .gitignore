@@ -46,6 +46,7 @@ Thumbs.db
 .env
 .env.local
 .env.*.local
+!.env.example
 
 # Logs
 *.log
@@ -97,5 +98,4 @@ out/
 .dockerignore
 
 # Local development
-.env.example
 local_config.yml

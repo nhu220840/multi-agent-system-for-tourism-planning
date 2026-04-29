@@ -19,9 +19,6 @@ _COORDINATOR_TOP_HEADER = "TOP 3 TRAI NGHIEM NEN UU TIEN:"
 _COORDINATOR_CHALLENGE_HEADER = "THACH THUC CO THE GAP & CACH XU LY:"
 _COORDINATOR_CHECKLIST_HEADER = "CHECKLIST TRUOC CHUYEN DI:"
 
-_SECTION_DIVIDER = "──────────────────────────────"
-
-
 def build_time_confirmation_question(destination: str) -> str:
     place_label = destination or "điểm đến này"
     return (
@@ -93,13 +90,11 @@ def format_planning_answer(
             return
         if lines:
             lines.append("")
-            lines.append(_SECTION_DIVIDER)
-            lines.append("")
         lines.append(title)
         lines.append("")
-        lines.extend(cleaned)
+        lines.extend(_prettify_vietnamese(line) for line in cleaned)
 
-    lines.append(f"KẾ HOẠCH DU LỊCH GỢI Ý — {destination.upper()}")
+    lines.append(_prettify_vietnamese(f"KẾ HOẠCH DU LỊCH GỢI Ý — {destination.upper()}"))
     lines.append(f"Hành trình: {days_label}")
 
     add_section("TÓM TẮT NHANH", [intro])
@@ -510,7 +505,8 @@ def _clean_user_facing_line(line: str) -> str:
     text = re.sub(r"\s*—\s*(?:Map|Bản đồ):\s*(https?://\S+)", r" — Bản đồ: \1", text)
     text = text.replace(" . ", ". ")
     text = re.sub(r"\s{2,}", " ", text).strip()
-    return text
+    text = _rewrite_itinerary_prose(text)
+    return _prettify_vietnamese(text)
 
 
 def _merge_unique_lines(lines: list[str]) -> list[str]:
@@ -545,3 +541,91 @@ def _days_compact_label(days: Any) -> str:
     if len(days) == 1:
         return f"Ngày {days[0]}"
     return f"Ngày {days[0]}–{days[-1]}"
+
+
+def _prettify_vietnamese(text: str) -> str:
+    out = str(text or "")
+    replacements: list[tuple[str, str]] = [
+        (r"\bDa Nang\b", "Đà Nẵng"),
+        (r"\bHoi An\b", "Hội An"),
+        (r"\bQuang Nam\b", "Quảng Nam"),
+        (r"\bNgay\b", "Ngày"),
+        (r"\bSang:", "Sáng:"),
+        (r"\bTrua:", "Trưa:"),
+        (r"\bChieu:", "Chiều:"),
+        (r"\bToi:", "Tối:"),
+        (r"\bHanh dong\b", "Hoạt động"),
+        (r"\bChi duong\b", "Chỉ đường"),
+        (r"\bBan do\b", "Bản đồ"),
+        (r"\bdia diem\b", "địa điểm"),
+        (r"\bdiem den\b", "điểm đến"),
+        (r"\bhanh trinh\b", "hành trình"),
+        (r"\btham khao\b", "tham khảo"),
+        (r"\bthoi tiet\b", "thời tiết"),
+        (r"\bdoi chieu\b", "đối chiếu"),
+        (r"\bam thuc\b", "ẩm thực"),
+        (r"\bvan hoa\b", "văn hoá"),
+        (r"\btrai nghiem\b", "trải nghiệm"),
+        (r"\bgoi y\b", "gợi ý"),
+        (r"\bluu tru\b", "lưu trú"),
+        (r"\bdi chuyen\b", "di chuyển"),
+        (r"\bkhach san\b", "khách sạn"),
+        (r"\bphu hop\b", "phù hợp"),
+        (r"\bmeo\b", "mẹo"),
+        (r"\bluu y\b", "lưu ý"),
+        (r"\bco the\b", "có thể"),
+        (r"\bdieu chinh\b", "điều chỉnh"),
+        (r"\bthuc te\b", "thực tế"),
+        (r"\bchua\b", "chưa"),
+        (r"\bgan\b", "gần"),
+        (r"\bbua sang\b", "bữa sáng"),
+        (r"\bbua trua\b", "bữa trưa"),
+        (r"\bbua toi\b", "bữa tối"),
+        (r"\btu tuc\b", "tự túc"),
+        (r"\bnghi\b", "nghỉ"),
+    ]
+    for pattern, replacement in replacements:
+        out = re.sub(pattern, replacement, out, flags=re.IGNORECASE)
+    return out
+
+
+def _rewrite_itinerary_prose(text: str) -> str:
+    out = str(text or "").strip()
+    if not out:
+        return out
+
+    self_service_replacements = [
+        (
+            r"^(?:[•-]\s*)?(?:Sang|Sáng):\s*An sang tai An sang tu tuc \(khong tim thay dia diem phu hop gan hanh trinh\)\.?\s*",
+            "Sáng: Tự túc bữa sáng vì chưa tìm thấy địa điểm phù hợp gần hành trình. ",
+        ),
+        (
+            r"^(?:[•-]\s*)?(?:Trua|Trưa):\s*An trua tai An trua tu tuc \(khong tim thay dia diem phu hop gan hanh trinh\)\.?\s*",
+            "Trưa: Tự túc bữa trưa vì chưa tìm thấy địa điểm phù hợp gần hành trình. ",
+        ),
+        (
+            r"^(?:[•-]\s*)?(?:Toi|Tối):\s*An toi tai An toi tu tuc \(khong tim thay dia diem phu hop gan hanh trinh\)\.?\s*",
+            "Tối: Tự túc bữa tối vì chưa tìm thấy địa điểm phù hợp gần hành trình. ",
+        ),
+    ]
+    for pattern, replacement in self_service_replacements:
+        out = re.sub(pattern, replacement, out, flags=re.IGNORECASE)
+
+    if re.match(r"^(?:[•-]\s*)?(?:Sang|Sáng):", out, flags=re.IGNORECASE):
+        out = re.sub(r"\.\s*(?:Hanh dong|Hoạt động):\s*", ". Sau đó, bạn có thể ", out, flags=re.IGNORECASE)
+    elif re.match(r"^(?:[•-]\s*)?(?:Chieu|Chiều):", out, flags=re.IGNORECASE):
+        out = re.sub(
+            r"^(?:([•-]\s*)?(?:Chieu|Chiều):)\s*(?:Hanh dong|Hoạt động):\s*",
+            r"\1 Buổi chiều phù hợp để ",
+            out,
+            flags=re.IGNORECASE,
+        )
+    elif re.match(r"^(?:[•-]\s*)?(?:Toi|Tối):", out, flags=re.IGNORECASE):
+        out = re.sub(r"\.\s*(?:Hanh dong|Hoạt động):\s*", ". Buổi tối, bạn có thể ", out, flags=re.IGNORECASE)
+
+    out = re.sub(r"\bdi dao/chill\b", "dạo chơi và thư giãn", out, flags=re.IGNORECASE)
+    out = re.sub(r"\bquanh khu vuc\b", "quanh khu vực", out, flags=re.IGNORECASE)
+    out = re.sub(r"\ban sang tai\b", "ăn sáng tại", out, flags=re.IGNORECASE)
+    out = re.sub(r"\ban trua tai\b", "ăn trưa tại", out, flags=re.IGNORECASE)
+    out = re.sub(r"\ban toi tai\b", "ăn tối tại", out, flags=re.IGNORECASE)
+    return out.strip()
