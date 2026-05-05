@@ -53,20 +53,6 @@ _SCHEMA_STATEMENTS = (
     )
     """,
     """
-    CREATE TABLE IF NOT EXISTS plans (
-        id TEXT PRIMARY KEY,
-        conversation_id TEXT NOT NULL,
-        principal_id TEXT NOT NULL,
-        city TEXT,
-        days INTEGER,
-        structured_json TEXT NOT NULL,
-        created_at TEXT NOT NULL,
-        updated_at TEXT NOT NULL,
-        FOREIGN KEY (conversation_id) REFERENCES conversations(id),
-        FOREIGN KEY (principal_id) REFERENCES principals(id)
-    )
-    """,
-    """
     CREATE TABLE IF NOT EXISTS places (
         place_id TEXT PRIMARY KEY,
         name TEXT NOT NULL,
@@ -119,8 +105,6 @@ _SCHEMA_STATEMENTS = (
     "CREATE INDEX IF NOT EXISTS idx_anonymous_sessions_principal_id ON anonymous_sessions(principal_id)",
     "CREATE INDEX IF NOT EXISTS idx_conversations_principal_id ON conversations(principal_id)",
     "CREATE INDEX IF NOT EXISTS idx_messages_conversation_id ON messages(conversation_id)",
-    "CREATE INDEX IF NOT EXISTS idx_plans_conversation_id ON plans(conversation_id)",
-    "CREATE INDEX IF NOT EXISTS idx_plans_principal_id ON plans(principal_id)",
     "CREATE INDEX IF NOT EXISTS idx_places_category ON places(category)",
     "CREATE INDEX IF NOT EXISTS idx_places_city_key ON places(city_key)",
     "CREATE INDEX IF NOT EXISTS idx_places_primary_area_key ON places(primary_area_key)",

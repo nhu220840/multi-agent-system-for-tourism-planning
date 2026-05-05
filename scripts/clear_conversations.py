@@ -33,17 +33,14 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 
-def _counts(cursor) -> tuple[int, int, int]:
+def _counts(cursor) -> tuple[int, int]:
     cursor.execute("SELECT COUNT(*) AS c FROM conversations")
     conv = cursor.fetchone()
     cursor.execute("SELECT COUNT(*) AS c FROM messages")
     msg = cursor.fetchone()
-    cursor.execute("SELECT COUNT(*) AS c FROM plans")
-    plans = cursor.fetchone()
     return (
         int(conv["c"] if isinstance(conv, dict) else conv[0]),
         int(msg["c"] if isinstance(msg, dict) else msg[0]),
-        int(plans["c"] if isinstance(plans, dict) else plans[0]),
     )
 
 
@@ -56,24 +53,20 @@ def main() -> None:
 
     with get_cursor(commit=not args.dry_run) as cursor:
         try:
-            conv_count, msg_count, plan_count = _counts(cursor)
+            conv_count, msg_count = _counts(cursor)
         except Exception as exc:
             print(f"❌ Could not read counts (database likely not initialised yet): {exc}")
             return
 
-        print(
-            f"Found {conv_count} conversations, {msg_count} messages, "
-            f"and {plan_count} plans."
-        )
+        print(f"Found {conv_count} conversations and {msg_count} messages.")
 
         if args.dry_run:
             print("[dry-run] Not deleting anything.")
             return
 
         cursor.execute("DELETE FROM messages")
-        cursor.execute("DELETE FROM plans")
         cursor.execute("DELETE FROM conversations")
-        print("✓ Cleared conversations, messages, and dependent plans.")
+        print("✓ Cleared conversations and messages.")
 
 
 if __name__ == "__main__":

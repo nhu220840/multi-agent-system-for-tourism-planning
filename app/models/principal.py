@@ -38,21 +38,3 @@ class ConversationSummary(BaseModel):
 class ConversationDetail(ConversationSummary):
     principal_id: str
     messages: list[MessagePayload] = Field(default_factory=list)
-
-
-class PlanSaveRequest(BaseModel):
-    conversation_id: str
-    city: str | None = None
-    days: int | None = Field(default=None, ge=1)
-    structured_json: dict[str, Any]
-
-
-class PlanPayload(BaseModel):
-    id: str
-    conversation_id: str
-    principal_id: str
-    city: str | None = None
-    days: int | None = None
-    structured_json: dict[str, Any]
-    created_at: datetime
-    updated_at: datetime

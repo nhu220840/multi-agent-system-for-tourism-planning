@@ -28,7 +28,7 @@ def validate_itinerary_plan(query: str, plan: str, places: list[dict[str, Any]])
     raw_plan_lower = raw_plan.lower()
     total_days = extract_trip_days(query) or 1
     interests = _extract_interest_tags(query)
-    day_count = len(re.findall(r"^\s*ngay\s+\d+", raw_plan_lower, flags=re.MULTILINE))
+    day_count = len(re.findall(r"^\s*ngay\s+\d+", normalized_plan, flags=re.MULTILINE))
     meal_lines = [
         line
         for line in raw_plan.splitlines()
@@ -38,7 +38,7 @@ def validate_itinerary_plan(query: str, plan: str, places: list[dict[str, Any]])
     real_meal_count = sum(1 for line in meal_lines if "tu tuc" not in fold_text(line))
     long_legs = [float(match) for match in re.findall(r"~(\d+(?:\.\d+)?)\s*km", raw_plan_lower)]
     has_morning = len([line for line in meal_lines if "sang:" in fold_text(line)]) >= total_days
-    has_afternoon = raw_plan_lower.count("• chieu:") >= total_days or raw_plan_lower.count("chieu:") >= total_days
+    has_afternoon = normalized_plan.count("• chieu:") >= total_days or normalized_plan.count("chieu:") >= total_days
     has_beach_signal = any(marker in normalized_plan for marker in _BEACH_MARKERS)
     has_culture_signal = any(marker in normalized_plan for marker in _CULTURE_MARKERS)
     has_real_food_signal = real_meal_count > 0

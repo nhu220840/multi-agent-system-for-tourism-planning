@@ -33,7 +33,7 @@ def root() -> dict:
         "endpoints": {
             "health": "/health",
             "chat": "/api/chat/send",
-            "session": "/api/session/me",
+            "session": "/api/session/init",
             "docs": "/docs",
         },
     }

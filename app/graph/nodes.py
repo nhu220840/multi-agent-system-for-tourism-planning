@@ -5,6 +5,7 @@ from typing import Any
 
 from app.agents.intake_agent import evaluate_intake
 from app.graph.state import TravelGraphState
+from app.services.place_metadata import fold_text as _fold_text
 from app.services.itinerary_validation import (
     build_retry_query,
     should_retry_itinerary,
@@ -21,15 +22,11 @@ from app.services.planning_tools import (
     score_places_tool,
 )
 from app.services.response_formatter import (
+    build_plan_revision_question,
     build_time_confirmation_question,
     format_planning_answer,
 )
 from app.services.stay_recommendation_service import build_stay_recommendations
-
-_INTAKE_FOLLOW_UP_ANSWER = (
-    "Minh chua du thong tin de truy xuat va len lich trinh. "
-    "Vui long tra loi cac cau hoi bo sung ben duoi."
-)
 
 _TRACE_TITLE_MAP = {
     "intake_agent": "Intake Agent",
@@ -271,8 +268,9 @@ def validator_node(state: TravelGraphState) -> dict[str, Any]:
 def clarify_response_node(state: TravelGraphState) -> dict[str, Any]:
     timings = _copy_timings(state)
     trace = _append_trace(state, "response_service")
+    answer = _build_intake_follow_up_answer(state)
     response_payload = {
-        "answer": _INTAKE_FOLLOW_UP_ANSWER,
+        "answer": answer,
         "conversation_stage": "intake",
         "collected_info": state.get("collected_info"),
         "missing_fields": state.get("missing_fields", []),
@@ -294,7 +292,7 @@ def clarify_response_node(state: TravelGraphState) -> dict[str, Any]:
         "debug_steps": _build_debug_steps(state, stage="intake"),
     }
     return {
-        "answer": _INTAKE_FOLLOW_UP_ANSWER,
+        "answer": answer,
         "conversation_stage": "intake",
         "trace": trace,
         "timings": timings,
@@ -305,11 +303,14 @@ def clarify_response_node(state: TravelGraphState) -> dict[str, Any]:
 def response_node(state: TravelGraphState) -> dict[str, Any]:
     started = perf_counter()
     timings = _copy_timings(state)
+    weather = state.get("weather")
+    destination = str((state.get("collected_info") or {}).get("destination") or "")
+    user_confirmed = _user_signaled_completion(state.get("message", ""))
     follow_up_questions = [
-        build_time_confirmation_question(
-            str((state.get("collected_info") or {}).get("destination") or "")
-        )
-    ]
+        build_plan_revision_question(destination, weather)
+        if _weather_ready_for_review(weather)
+        else build_time_confirmation_question(destination)
+    ] if not user_confirmed else []
     step_started = perf_counter()
     stay_recommendations = build_stay_recommendations(
         query=state.get("rag_query", state.get("message", "")),
@@ -324,7 +325,7 @@ def response_node(state: TravelGraphState) -> dict[str, Any]:
         research=state.get("research"),
         plan=state.get("plan"),
         coordinator_plan=state.get("coordinator_plan"),
-        weather=state.get("weather"),
+        weather=weather,
         transport=state.get("transport"),
         recommended_hotel=state.get("recommended_hotel"),
         mobility_plan=state.get("mobility_plan"),
@@ -334,6 +335,12 @@ def response_node(state: TravelGraphState) -> dict[str, Any]:
         verified_places=state.get("verified_places"),
         route_plan=state.get("route_plan"),
     )
+    if user_confirmed:
+        formatted_answer = (
+            f"{formatted_answer}\n\n"
+            "Chúc bạn có chuyến đi thật vui ở Đà Nẵng và nhiều trải nghiệm đẹp. "
+            "Cảm ơn bạn đã để mình đồng hành lên kế hoạch cùng bạn."
+        ).strip()
     timings["response_format_ms"] = round((perf_counter() - step_started) * 1000, 1)
     trace = _append_trace(state, "response_service")
     timings["response_ms"] = round((perf_counter() - started) * 1000, 1)
@@ -351,7 +358,7 @@ def response_node(state: TravelGraphState) -> dict[str, Any]:
         "plan_validation": state.get("plan_validation"),
         "research": state.get("research"),
         "coordinator_plan": state.get("coordinator_plan"),
-        "weather": state.get("weather"),
+        "weather": weather,
         "transport": state.get("transport"),
         "recommended_hotel": state.get("recommended_hotel"),
         "mobility_plan": state.get("mobility_plan"),
@@ -389,6 +396,75 @@ def _merge_grounding_with_validation(
     if plan_validation is not None:
         merged["plan_validation"] = plan_validation
     return merged
+
+
+def _weather_ready_for_review(weather: dict[str, Any] | None) -> bool:
+    return bool(weather) and str((weather or {}).get("forecast_status") or "") == "forecast_available"
+
+
+def _user_signaled_completion(message: str) -> bool:
+    lines = [str(item).strip() for item in str(message or "").splitlines() if str(item).strip()]
+    latest = _fold_text(lines[-1] if lines else str(message or ""))
+    done_phrases = (
+        "ok vay",
+        "on roi",
+        "duoc roi",
+        "giu nguyen",
+        "khong can doi",
+        "khong sua nua",
+        "hai long",
+        "cam on",
+    )
+    change_phrases = (
+        "muon doi",
+        "doi giup",
+        "doi lai",
+        "thay bang",
+        "sua",
+        "them",
+        "bot",
+        "thay",
+        "replan",
+    )
+    if not any(phrase in latest for phrase in done_phrases):
+        return False
+    return not any(phrase in latest for phrase in change_phrases)
+
+
+def _build_intake_follow_up_answer(state: TravelGraphState) -> str:
+    collected = dict(state.get("collected_info") or {})
+    missing = list(state.get("missing_fields") or [])
+    follow_ups = state.get("follow_up_questions") or []
+    next_question = str(follow_ups[0] or "").strip() if follow_ups else ""
+
+    destination = str(collected.get("destination") or "").strip() or "Da Nang"
+    days = str(collected.get("days") or "").strip()
+    interests = str(collected.get("interests") or "").strip()
+
+    if missing == ["days", "interests"]:
+        return (
+            "Chào bạn, mình là chatbot tư vấn lập kế hoạch du lịch Đà Nẵng. "
+            "Mình sẽ hỏi bạn từng câu ngắn để gom đủ thông tin, sau đó tổng hợp lại và lên lịch trình phù hợp. "
+            f"Trước tiên: {next_question}"
+        ).strip()
+
+    summary_bits: list[str] = [f"điểm đến {destination}"]
+    if days:
+        summary_bits.append(f"thời lượng {days} ngày")
+    if interests:
+        summary_bits.append(f"ưu tiên {interests}")
+    summary = ", ".join(summary_bits)
+
+    if next_question:
+        return (
+            f"Mình đã ghi nhận {summary}. "
+            f"Để lên kế hoạch sát hơn, mình hỏi thêm 1 câu nhé: {next_question}"
+        ).strip()
+
+    return (
+        f"Mình đã ghi nhận {summary}. "
+        "Bạn cứ nói thêm điều bạn muốn ưu tiên hoặc thay đổi, mình sẽ cập nhật tiếp."
+    ).strip()
 
 
 def route_after_intake(state: TravelGraphState) -> str:

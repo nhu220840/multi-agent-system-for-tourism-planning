@@ -43,10 +43,10 @@ The API will be available at `http://localhost:8000` with documentation at `/doc
 | Endpoint | Method | Description |
 |----------|--------|-------------|
 | `/health` | GET | Health check |
-| `/api/chat` | POST | Create travel itinerary |
+| `/api/chat/send` | POST | Create travel itinerary |
 | `/docs` | GET | Interactive API documentation (Swagger UI) |
 
-### POST `/api/chat` Request Body
+### POST `/api/chat/send` Request Body
 ```json
 {
   "message": "3-day itinerary in Da Nang, interested in museums and beaches"
@@ -192,7 +192,7 @@ Converts structured output to user-friendly format
 
 The system uses hybrid retrieval combining lexical and semantic search:
 
-- **Source of Truth**: PostgreSQL stores places, place chunks, sessions, conversations, and plans
+- **Source of Truth**: PostgreSQL stores places, place chunks, sessions, and conversations
 - **Search Index**: Elasticsearch stores synced `places` and `place_chunks` indices for low-latency retrieval
 - **Lexical Search**: Elasticsearch multi-field ranking over place name, description, snippets, address, and tags
 - **Vector Search**: Semantic similarity using embeddings for contextual matching
@@ -321,7 +321,7 @@ docker-compose -f docker/docker-compose.yml up
 
 - **FastAPI**: Web framework
 - **LangGraph**: 3-agent orchestration with validation loop and tool execution
-- **PostgreSQL**: Source of truth for places, sessions, conversations, plans, and RAG chunks
+- **PostgreSQL**: Source of truth for places, sessions, conversations, and RAG chunks
 - **Elasticsearch**: Search index synced from PostgreSQL for fast retrieval
 - **Pydantic**: Data validation
 - **OpenAI/OpenRouter SDK**: Optional LLM integration

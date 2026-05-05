@@ -17,6 +17,7 @@ ROOT = Path(__file__).resolve().parents[2]
 RAG_JSON = ROOT / "data" / "rag" / "rag_documents.json"
 UNIFIED_JSON = ROOT / "data" / "processed" / "unified_places.json"
 _DEFAULT_EMBEDDING_MODEL = "intfloat/multilingual-e5-small"
+_SENTENCE_TRANSFORMERS_DISABLED = False
 _SOURCE_KIND_CATEGORY_MAP = {
     "destinations": {"destination"},
     "entertainment": {"entertainment"},
@@ -252,14 +253,19 @@ def _embed_with_sentence_transformers(
     model_name: str,
     input_type: str,
 ) -> tuple[list[list[float]], str | None]:
+    global _SENTENCE_TRANSFORMERS_DISABLED
+    if _SENTENCE_TRANSFORMERS_DISABLED:
+        return [], model_name
     try:
         from sentence_transformers import SentenceTransformer  # type: ignore
     except Exception:
+        _SENTENCE_TRANSFORMERS_DISABLED = True
         return [], model_name
 
     prepared = [_prepare_embedding_text(text, input_type=input_type, model_name=model_name) for text in texts]
     model = _get_sentence_transformer(model_name)
     if model is None:
+        _SENTENCE_TRANSFORMERS_DISABLED = True
         return [], model_name
 
     batch_size = max(1, int(get_settings().embedding_batch_size or 32))
@@ -272,6 +278,7 @@ def _embed_with_sentence_transformers(
             convert_to_numpy=True,
         )
     except Exception:
+        _SENTENCE_TRANSFORMERS_DISABLED = True
         return [], model_name
     return [vector.tolist() for vector in vectors], model_name
 

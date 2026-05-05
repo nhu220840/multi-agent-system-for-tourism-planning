@@ -31,7 +31,7 @@ def evaluate_intake(message: str) -> IntakeResult:
 
     required = ["destination", "days", "interests"]
     missing = [k for k in required if not collected[k]]
-    questions = [_question_for_field(k) for k in missing]
+    questions = [_question_for_field(missing[0])] if missing else []
     return IntakeResult(
         is_complete=len(missing) == 0,
         collected=collected,
@@ -74,16 +74,16 @@ def _extract_days(text: str) -> str:
 
 def _extract_interests(folded: str) -> str:
     interest_aliases: dict[str, list[str]] = {
-        "am_thuc": ["am thuc", "an uong", "dac san", "nha hang", "food", "anuong"],
-        "bien": ["bien", "tam bien", "bo bien", "beach"],
-        "bao_tang": ["bao tang", "museum", "trien lam"],
-        "di_tich_lich_su": ["di tich", "lich su", "van hoa", "co kinh", "historic", "heritage"],
-        "tam_linh": ["tam linh", "chua", "den", "pagoda", "linh ung"],
-        "mua_sam": ["mua sam", "shopping", "cho dem", "mall", "mua"],
-        "cafe_chill": ["cafe", "ca phe", "chill", "song ao"],
-        "thien_nhien": ["thien nhien", "nui", "rung", "trekking", "leo nui", "doi"],
-        "giai_tri_dem": ["bar", "pub", "nightlife", "di dem", "dem"],
-        "gia_dinh_tre_em": ["gia dinh", "tre em", "be", "kid-friendly"],
+        "ẩm thực": ["am thuc", "an uong", "dac san", "nha hang", "food", "anuong"],
+        "biển": ["bien", "tam bien", "bo bien", "beach"],
+        "bảo tàng": ["bao tang", "museum", "trien lam"],
+        "di tích, lịch sử": ["di tich", "lich su", "van hoa", "co kinh", "historic", "heritage"],
+        "tâm linh": ["tam linh", "chua", "den", "pagoda", "linh ung"],
+        "mua sắm": ["mua sam", "shopping", "cho dem", "mall", "mua"],
+        "cafe chill": ["cafe", "ca phe", "chill", "song ao"],
+        "thiên nhiên": ["thien nhien", "nui", "rung", "trekking", "leo nui", "doi"],
+        "giải trí đêm": ["bar", "pub", "nightlife", "di dem", "dem"],
+        "gia đình, trẻ em": ["gia dinh", "tre em", "be", "kid-friendly"],
     }
     picked: list[str] = []
     for canonical, aliases in interest_aliases.items():
@@ -94,11 +94,10 @@ def _extract_interests(folded: str) -> str:
 
 def _question_for_field(field: str) -> str:
     prompts = {
-        "destination": "Ban tap trung khu vuc nao? (Da Nang / Hoi An / Quang Nam — mac dinh Da Nang)",
-        "days": "Ban di may ngay?",
+        "destination": "Bạn muốn mình tư vấn chính cho khu vực nào? (Đà Nẵng / Hội An / Quảng Nam, mặc định là Đà Nẵng)",
+        "days": "Bạn dự định đi mấy ngày?",
         "interests": (
-            "Ban uu tien trai nghiem gi? (VD: am thuc, di tich lich su, bao tang, bien, "
-            "mua sam, cafe chill, tam linh, thien nhien...)"
+            "Bạn ưu tiên trải nghiệm gì nhất? (ví dụ: ẩm thực, biển, bảo tàng, di tích, cafe chill, mua sắm, tâm linh...)"
         ),
     }
     return prompts[field]

@@ -1,11 +1,8 @@
 from pydantic import BaseModel, Field
 
 
-class ChatRequest(BaseModel):
+class ChatSendRequest(BaseModel):
     message: str = Field(..., min_length=1, description="User message")
-
-
-class ChatSendRequest(ChatRequest):
     conversation_id: str | None = Field(
         default=None,
         description="Existing conversation id for follow-up messages.",

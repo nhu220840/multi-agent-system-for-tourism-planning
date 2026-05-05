@@ -14,7 +14,6 @@ class DebugStep(BaseModel):
 class ChatResponse(BaseModel):
     answer: str
     conversation_id: str | None = None
-    plan_id: str | None = None
     conversation_stage: str = "planning"
     collected_info: dict[str, Any] | None = None
     missing_fields: list[str] | None = None

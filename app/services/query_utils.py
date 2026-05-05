@@ -12,11 +12,11 @@ def extract_trip_days(
     default: int | None = 1,
     max_days: int = 7,
 ) -> int | None:
-    match = _DAY_PATTERN.search(query or "")
-    if not match:
+    matches = list(_DAY_PATTERN.finditer(query or ""))
+    if not matches:
         return default
     try:
-        days = int(match.group(1))
+        days = int(matches[-1].group(1))
     except Exception:
         return default
     return max(1, min(days, max_days))

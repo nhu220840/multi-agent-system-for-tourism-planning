@@ -1,5 +1,6 @@
 const API_BASE =
   process.env.NEXT_PUBLIC_API_BASE_URL?.replace(/\/$/, "") || "http://localhost:8000/api";
+const CHAT_REQUEST_TIMEOUT_MS = Number.parseInt(process.env.NEXT_PUBLIC_CHAT_TIMEOUT_MS || "180000", 10);
 
 export type Principal = {
   id: string;
@@ -43,7 +44,6 @@ export type ChatRequest = {
 export type ChatResponse = {
   answer: string;
   conversation_id?: string | null;
-  plan_id?: string | null;
   trace: string[];
   debug_steps?: DebugStep[];
   conversation_stage?: string;
@@ -68,6 +68,24 @@ async function parseJson<T>(response: Response, errorPrefix: string): Promise<T>
   }
 
   return (await response.json()) as T;
+}
+
+async function fetchWithTimeout(
+  input: RequestInfo | URL,
+  init: RequestInit,
+  timeoutMs: number,
+): Promise<Response> {
+  const safeTimeout = Number.isFinite(timeoutMs) && timeoutMs > 0 ? timeoutMs : 90000;
+  const controller = new AbortController();
+  const timeoutId = window.setTimeout(() => controller.abort(), safeTimeout);
+  try {
+    return await fetch(input, {
+      ...init,
+      signal: controller.signal,
+    });
+  } finally {
+    window.clearTimeout(timeoutId);
+  }
 }
 
 export async function initSession(): Promise<SessionInfo> {
@@ -108,18 +126,39 @@ export async function deleteConversation(conversationId: string): Promise<void> 
   }
 }
 
+export async function deleteAllConversations(): Promise<{ deleted_conversations: number }> {
+  const response = await fetch(`${API_BASE}/conversations`, {
+    method: "DELETE",
+    credentials: "include",
+  });
+
+  return parseJson<{ deleted_conversations: number }>(response, "Conversation reset failed");
+}
+
 export async function sendChat(message: string, conversationId?: string): Promise<ChatResponse> {
   await initSession();
 
-  const response = await fetch(`${API_BASE}/chat/send`, {
-    method: "POST",
-    credentials: "include",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({
-      message,
-      conversation_id: conversationId,
-    } satisfies ChatRequest),
-  });
+  let response: Response;
+  try {
+    response = await fetchWithTimeout(
+      `${API_BASE}/chat/send`,
+      {
+        method: "POST",
+        credentials: "include",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          message,
+          conversation_id: conversationId,
+        } satisfies ChatRequest),
+      },
+      CHAT_REQUEST_TIMEOUT_MS,
+    );
+  } catch (error) {
+    if (error instanceof DOMException && error.name === "AbortError") {
+      throw new Error(`Chat request timed out after ${Math.round(CHAT_REQUEST_TIMEOUT_MS / 1000)}s`);
+    }
+    throw error;
+  }
 
   return parseJson<ChatResponse>(response, "Chat request failed");
 }

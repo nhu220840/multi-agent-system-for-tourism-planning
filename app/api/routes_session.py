@@ -27,10 +27,3 @@ def init_session(
     principal: PrincipalContext = Depends(get_current_principal),
 ) -> SessionInfoResponse:
     return _to_session_response(principal)
-
-
-@router.get("/me", response_model=SessionInfoResponse)
-def read_session(
-    principal: PrincipalContext = Depends(get_current_principal),
-) -> SessionInfoResponse:
-    return _to_session_response(principal)

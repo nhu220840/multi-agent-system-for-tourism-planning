@@ -20,6 +20,7 @@ from app.services.route_utils import (
     resolve_segment_points,
     segment_map_url,
 )
+from app.services.weather_service import get_weather_for_trip
 from app.services.vector_rag import format_chunk_context, retrieve_chunk_hits
 from app.tools.elasticsearch_tool import search_processed_places
 from app.tools.local_catalog_tool import (
@@ -265,6 +266,11 @@ def retrieve_trip_artifacts(
                 limit=max(top_k, required_total),
             )
 
+    weather = get_weather_for_trip(
+        query=query,
+        destination_hint=query,
+        trip_days=extract_trip_days(query, default=None),
+    )
     transport = _transport_suggestions_from_weather(weather)
     map_selection = {"recommended_hotel": None, "mobility_plan": None}
 
@@ -391,6 +397,8 @@ def build_coordinator_output(query: str, itinerary: str, transport: List[str] | 
 
 def _transport_suggestions_from_weather(weather: dict | None) -> List[str] | None:
     if not weather:
+        return None
+    if str(weather.get("forecast_status") or "").strip() != "forecast_available":
         return None
     desc = str(weather.get("description") or "").lower()
     windy = float(weather.get("wind_kmh") or 0) >= 25
@@ -857,11 +865,11 @@ def _build_research_summary(query: str, places: List[dict], transport: List[str]
     stays = _pick_stay_areas(places, limit=3)
     destination_upper = destination.upper()
     lines = [
-        f"TONG QUAN NGHIEN CUU {destination_upper}",
+        f"TỔNG QUAN NGHIÊN CỨU {destination_upper}",
         "",
-        f"{destination} la diem den phu hop cho hanh trinh {days} ngay voi trai nghiem can bang giua tham quan, am thuc va van hoa.",
+        f"{destination} là điểm đến phù hợp cho hành trình {days} ngày với trải nghiệm cân bằng giữa tham quan, ẩm thực và văn hoá.",
         "",
-        "CAC DIEM NOI BAT:",
+        "CÁC ĐIỂM NỔI BẬT:",
     ]
     if attractions:
         for p in attractions:
@@ -869,30 +877,30 @@ def _build_research_summary(query: str, places: List[dict], transport: List[str]
             category = str(p.get("category") or "").strip()
             address = str(p.get("address") or "").strip()
             if name:
-                tail = f" - {category}" if category else ""
+                tail = f" — {category}" if category else ""
                 if address:
                     tail += f" ({address})"
                 lines.append(f"• {name}{tail}")
     else:
-        lines.append("• Dang thieu du lieu diem tham quan trong database.")
+        lines.append("• Đang thiếu dữ liệu điểm tham quan trong cơ sở dữ liệu.")
 
     lines.append("")
-    lines.append("KHU VUC NEN O:")
+    lines.append("KHU VỰC NÊN Ở:")
     if stays:
         lines.extend([f"• {a}" for a in stays])
     else:
-        lines.append("• Trung tam thanh pho (de di chuyen)")
+        lines.append("• Trung tâm thành phố (thuận tiện di chuyển)")
 
     lines.append("")
-    lines.append("TRAVEL TIPS:")
+    lines.append("MẸO DU LỊCH:")
     if transport:
         lines.extend([f"• {t}" for t in transport[:6]])
     else:
         lines.extend(
             [
-                "• Uu tien di som tai cac diem dong khach.",
-                "• Kiem tra gio mo cua truoc khi di.",
-                "• Du tru 10-20% thoi gian cho di chuyen.",
+                "• Ưu tiên đi sớm tại các điểm đông khách.",
+                "• Kiểm tra giờ mở cửa trước khi đi.",
+                "• Dự trữ thêm 10–20% thời gian cho di chuyển.",
             ]
         )
     return "\n".join(lines).strip()
@@ -933,49 +941,49 @@ def _build_coordinator_plan(
     days = extract_trip_days(query) or 1
     destination = _target_city_key_from_query(query).replace("_", " ").title()
     lines = [
-        f"KE HOACH DU LICH {destination.upper()} HOAN CHINH",
+        f"KẾ HOẠCH DU LỊCH {destination.upper()} HOÀN CHỈNH",
         "",
-        "TOM TAT DIEU HANH:",
-        f"Ke hoach {days} ngay tai {destination} duoc tong hop tu Research Agent va Itinerary Agent,",
-        "can bang trai nghiem tham quan, am thuc, van hoa va di chuyen thuc te.",
+        "TÓM TẮT ĐIỀU HÀNH:",
+        f"Kế hoạch {days} ngày tại {destination} được tổng hợp từ Research Agent và Itinerary Agent,",
+        "cân bằng trải nghiệm tham quan, ẩm thực, văn hoá và di chuyển thực tế.",
         "",
-        "CAC PHAN OUTPUT:",
-        "1) Research Summary: Tong quan diem den, diem noi bat, khu vuc nen o, travel tips.",
-        "2) Itinerary Chi Tiet: Ke hoach sang/trua/chieu/toi cho tung ngay.",
-        "3) Coordinator Plan: Chien luoc trien khai, rui ro, checklist hanh dong.",
+        "CÁC PHẦN OUTPUT:",
+        "1) Research Summary: Tổng quan điểm đến, điểm nổi bật, khu vực nên ở, mẹo du lịch.",
+        "2) Itinerary chi tiết: Gợi ý sáng / trưa / chiều / tối cho từng ngày.",
+        "3) Coordinator Plan: Chiến lược triển khai, rủi ro, checklist hành động.",
         "",
-        "TOP 3 TRAI NGHIEM NEN UU TIEN:",
+        "TOP 3 TRẢI NGHIỆM NÊN ƯU TIÊN:",
         "",
         *_top_3_priorities_from_itinerary(itinerary),
         "",
-        "TOM TAT LICH THEO NGAY:",
+        "TÓM TẮT LỊCH THEO NGÀY:",
         *_compact_day_overview(itinerary),
         "",
-        "CHIEN LUOC DI CHUYEN & TRIEN KHAI:",
-        "• Uu tien kham pha theo cum khu vuc de giam thoi gian di chuyen.",
-        "• Ket hop lich co cau truc voi khoang thoi gian linh hoat.",
-        "• Chi su dung dia diem da duoc truy xuat/kiem chung trong he thong.",
+        "CHIẾN LƯỢC DI CHUYỂN & TRIỂN KHAI:",
+        "• Ưu tiên khám phá theo cụm khu vực để giảm thời gian di chuyển.",
+        "• Kết hợp lịch có cấu trúc với khoảng thời gian linh hoạt.",
+        "• Chỉ sử dụng địa điểm đã được truy xuất / kiểm chứng trong hệ thống.",
         "",
-        "THACH THUC CO THE GAP & CACH XU LY:",
+        "THÁCH THỨC CÓ THỂ GẶP & CÁCH XỬ LÝ:",
     ]
     if transport:
         lines.extend([f"• {t}" for t in transport[:3]])
     else:
         lines.extend(
             [
-                "• Gio cao diem: di chuyen som hon 30-45 phut.",
-                "• Thoi tiet xau: uu tien diem trong nha va phuong an taxi/Grab.",
+                "• Giờ cao điểm: di chuyển sớm hơn 30–45 phút.",
+                "• Thời tiết xấu: ưu tiên điểm trong nhà và phương án taxi / Grab.",
             ]
         )
     lines.extend(
         [
             "",
-            "CHECKLIST TRUOC CHUYEN DI:",
-            "□ Xac nhan gio mo cua cac diem truoc ngay di.",
-            "□ Chot thu tu diem uu tien cho tung ngay.",
-            "□ Luu san map offline va du phong pin/sac du phong.",
+            "CHECKLIST TRƯỚC CHUYẾN ĐI:",
+            "□ Xác nhận giờ mở cửa các điểm trước ngày đi.",
+            "□ Chốt thứ tự điểm ưu tiên cho từng ngày.",
+            "□ Lưu sẵn map offline và dự phòng pin / sạc dự phòng.",
             "",
-            "KET QUA KY VONG: Chuyen di duoc to chuc mach lac, tiet kiem thoi gian len ke hoach va toi uu trai nghiem tai diem den.",
+            "KẾT QUẢ KỲ VỌNG: Chuyến đi được tổ chức mạch lạc, tiết kiệm thời gian lên kế hoạch và tối ưu trải nghiệm tại điểm đến.",
         ]
     )
     return "\n".join(lines).strip()
@@ -985,23 +993,26 @@ def _top_3_priorities_from_itinerary(itinerary: str) -> List[str]:
     picked: List[str] = []
     for line in itinerary.splitlines():
         s = line.strip()
-        if "Hanh dong:" in s and "tai " in s:
-            candidate = s.rsplit("tai ", 1)[-1].strip()
-        elif "(tham quan):" in s or "(giai tri):" in s:
+        candidate = ""
+        if "Hanh dong:" in s or "Hoạt động:" in s or "hoạt động:" in s.lower():
+            if "tại " in s:
+                candidate = s.rsplit("tại ", 1)[-1].strip()
+            elif "tai " in s:
+                candidate = s.rsplit("tai ", 1)[-1].strip()
+        elif "(tham quan):" in s.lower() or "(giải trí):" in s.lower() or "(giai tri):" in s.lower():
             candidate = s.split(":", 1)[1].strip() if ":" in s else s
-        else:
-            candidate = ""
         if candidate:
-            candidate = re.sub(r"\s*—\s*Nguon:.*$", "", candidate).strip()
+            candidate = re.sub(r"\s*—\s*Nguồn:.*$", "", candidate, flags=re.IGNORECASE).strip()
+            candidate = re.sub(r"\s*—\s*Nguon:.*$", "", candidate, flags=re.IGNORECASE).strip()
             if candidate and candidate not in picked:
                 picked.append(candidate)
         if len(picked) >= 3:
             break
     if not picked:
         return [
-            "1. Uu tien 1: Cac diem tham quan noi bat trong trung tam.",
-            "2. Uu tien 2: Cum diem giai tri gan nhau de toi uu di chuyen.",
-            "3. Uu tien 3: Khung gio toi cho an uong va trai nghiem dia phuong.",
+            "1. Ưu tiên 1: Các điểm tham quan nổi bật trong trung tâm.",
+            "2. Ưu tiên 2: Cụm điểm giải trí gần nhau để tối ưu di chuyển.",
+            "3. Ưu tiên 3: Khung giờ tốt cho ăn uống và trải nghiệm địa phương.",
         ]
     return [f"{i + 1}. {v}" for i, v in enumerate(picked[:3])]
 
@@ -1010,10 +1021,10 @@ def _compact_day_overview(itinerary: str) -> List[str]:
     out: List[str] = []
     for line in itinerary.splitlines():
         s = line.strip()
-        if s.startswith("NGAY "):
+        if re.match(r"^(?:Ngày|NGAY|NGÀY)\s+\d+", s):
             out.append(f"• {s}")
         if len(out) >= 7:
             break
     if not out:
-        return ["• Lich trinh chi tiet da duoc tao theo tung ngay trong Itinerary Agent."]
+        return ["• Lịch trình chi tiết đã được tạo theo từng ngày trong Itinerary Agent."]
     return out

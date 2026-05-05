@@ -9,22 +9,43 @@ from app.services.query_utils import extract_trip_days
 # Headers produced by upstream agents (kept ASCII-fold because the source
 # strings live in the other services). The final user-facing output below is
 # written in proper diacritic Vietnamese.
-_RESEARCH_HIGHLIGHTS_HEADER = "CAC DIEM NOI BAT:"
-_RESEARCH_STAY_HEADER = "KHU VUC NEN O:"
-_RESEARCH_TIPS_HEADER = "TRAVEL TIPS:"
-_PLAN_STAY_HEADER = "GOI Y NOI NGHI:"
-_PLAN_SUMMARY_PREFIX = "Goi y tong quan:"
-_PLAN_NOTE_PREFIX = "Luu y:"
-_COORDINATOR_TOP_HEADER = "TOP 3 TRAI NGHIEM NEN UU TIEN:"
-_COORDINATOR_CHALLENGE_HEADER = "THACH THUC CO THE GAP & CACH XU LY:"
-_COORDINATOR_CHECKLIST_HEADER = "CHECKLIST TRUOC CHUYEN DI:"
+_RESEARCH_HIGHLIGHTS_HEADER = "CÁC ĐIỂM NỔI BẬT:"
+_RESEARCH_STAY_HEADER = "KHU VỰC NÊN Ở:"
+_RESEARCH_TIPS_HEADER = "MẸO DU LỊCH:"
+_PLAN_STAY_HEADER = "GỢI Ý NƠI NGHỈ:"
+_PLAN_SUMMARY_PREFIX = "Gợi ý tổng quan:"
+_PLAN_NOTE_PREFIX = "Lưu ý:"
+_COORDINATOR_TOP_HEADER = "TOP 3 TRẢI NGHIỆM NÊN ƯU TIÊN:"
+_COORDINATOR_CHALLENGE_HEADER = "THÁCH THỨC CÓ THỂ GẶP & CÁCH XỬ LÝ:"
+_COORDINATOR_CHECKLIST_HEADER = "CHECKLIST TRƯỚC CHUYẾN ĐI:"
+
 
 def build_time_confirmation_question(destination: str) -> str:
     place_label = destination or "điểm đến này"
     return (
-        f"Bạn dự định đi {place_label} vào ngày cụ thể nào hoặc vào giai đoạn nào "
-        "(ví dụ: cuối tháng 6, mùa hè, dịp lễ 2/9)? "
-        "Khi bạn chốt thời gian, mình sẽ đối chiếu thời tiết và nhắc bạn cần chuẩn bị gì."
+        f"Bạn muốn đi {place_label} vào ngày cụ thể nào? "
+        "(ví dụ: 12/06/2026 hoặc 12-14/06/2026). "
+        "Khi có mốc thời gian rõ hơn, mình sẽ check thời tiết và nhắc các lưu ý phù hợp."
+    )
+
+
+def build_plan_revision_question(destination: str, weather: dict[str, Any] | None) -> str:
+    place_label = destination or "chuyến đi này"
+    if not weather:
+        return (
+            f"Nếu bạn muốn tinh chỉnh lại lịch trình ở {place_label}, "
+            "cứ nói rõ phần muốn đổi, mình sẽ cập nhật tiếp."
+        )
+
+    if (weather or {}).get("should_offer_replan"):
+        return (
+            "Dựa trên thời tiết dự kiến, mình có thể chỉnh lại lịch để phù hợp hơn. "
+            "Bạn muốn mình đổi điểm nào hoặc ưu tiên hoạt động trong nhà/ngoài trời ra sao?"
+        )
+
+    return (
+        "Kế hoạch hiện tại vẫn khá ổn với thời tiết dự kiến. "
+        "Nếu bạn vẫn muốn đổi điểm nào, đổi thứ tự ngày nào hoặc thêm bớt hoạt động, mình chỉnh tiếp cho bạn."
     )
 
 
@@ -47,6 +68,7 @@ def format_planning_answer(
 ) -> str:
     destination = _destination_label(query=query, collected_info=collected_info)
     days_label = _trip_days_label(query=query, collected_info=collected_info)
+    request_summary_lines = _format_request_summary(collected_info, destination=destination, days_label=days_label)
     research_sections = _parse_research_summary(research or "")
     itinerary_sections = _parse_itinerary_plan(plan or "")
     coordinator_sections = _parse_coordinator_plan(coordinator_plan or "")
@@ -59,12 +81,17 @@ def format_planning_answer(
     )
     transport_lines = _format_transport_lines(transport or [])
     weather_lines = _format_weather_lines(weather, mobility_plan)
+    weather_adjustment_lines = _format_weather_adjustment_lines(weather)
     checklist_lines = coordinator_sections["checklist_lines"]
     challenge_lines = coordinator_sections["challenge_lines"]
     tips_lines = _merge_unique_lines(
         research_sections["tip_lines"] + itinerary_sections["note_lines"] + challenge_lines + checklist_lines
     )
-    follow_up = build_time_confirmation_question(destination)
+    follow_up = (
+        build_plan_revision_question(destination, weather)
+        if _weather_is_specific(weather)
+        else build_time_confirmation_question(destination)
+    )
 
     intro = research_sections["overview"]
     if not intro:
@@ -97,8 +124,10 @@ def format_planning_answer(
     lines.append(_prettify_vietnamese(f"KẾ HOẠCH DU LỊCH GỢI Ý — {destination.upper()}"))
     lines.append(f"Hành trình: {days_label}")
 
+    add_section("NHU CẦU MÌNH ĐÃ GHI NHẬN", request_summary_lines)
     add_section("TÓM TẮT NHANH", [intro])
     add_section("THỜI TIẾT & THỜI ĐIỂM", weather_lines)
+    add_section("TINH CHỈNH THEO THỜI TIẾT", weather_adjustment_lines)
     add_section("ĐIỂM NHẤN HÀNH TRÌNH", highlight_lines)
     add_section("NƠI LƯU TRÚ ĐỀ XUẤT", stay_lines)
     add_section("LỊCH TRÌNH CHI TIẾT", itinerary_sections["day_blocks"], keep_blank=True)
@@ -371,6 +400,25 @@ def _format_transport_lines(transport: list[str]) -> list[str]:
     return [_bulletify(line) for line in transport if str(line).strip()]
 
 
+def _format_request_summary(
+    collected_info: dict[str, Any] | None,
+    *,
+    destination: str,
+    days_label: str,
+) -> list[str]:
+    collected = collected_info or {}
+    lines = [
+        f"• Điểm đến chính: {destination}.",
+        f"• Thời lượng dự kiến: {days_label}.",
+    ]
+    interests = str(collected.get("interests") or "").strip()
+    if interests:
+        lines.append(f"• Ưu tiên trải nghiệm: {interests}.")
+    else:
+        lines.append("• Ưu tiên trải nghiệm: mình đang giữ ở mức cân bằng giữa tham quan, ăn uống và thư giãn.")
+    return lines
+
+
 def _format_weather_lines(
     weather: dict[str, Any] | None,
     mobility_plan: dict[str, Any] | None,
@@ -392,21 +440,53 @@ def _format_weather_lines(
                 lines.append(extra)
         return lines
 
+    status = str(weather.get("forecast_status") or "").strip()
+    if status == "need_specific_date":
+        lines = [
+            "• Mình đã nhận được thời gian bạn nêu nhưng mốc này chưa đủ cụ thể để check forecast chi tiết.",
+            f"• {str((weather.get('advice_lines') or ['Bạn hãy gửi ngày rõ hơn để mình đối chiếu thời tiết chính xác.'])[0])}",
+        ]
+        return lines
+
+    if status == "out_of_range":
+        label = str(weather.get("travel_window_label") or "thời gian bạn dự định đi").strip()
+        lines = [f"• Mình đã ghi nhận mốc {label}, nhưng hiện forecast ngày cụ thể cho giai đoạn này còn quá xa."]
+        lines.extend(_bulletify(line) for line in (weather.get("advice_lines") or [])[:2])
+        lines.append("• Bạn có thể quay lại gần ngày đi hơn để mình check thời tiết chính xác theo ngày.")
+        return lines
+
+    if status == "api_unavailable":
+        lines = [f"• Mình chưa lấy được forecast chi tiết cho {str(weather.get('travel_window_label') or 'thời gian bạn vừa nêu').strip()}."]
+        lines.extend(_bulletify(line) for line in (weather.get("advice_lines") or [])[:2])
+        return lines
+
     location = str(weather.get("location") or "điểm đến").strip()
     description = str(weather.get("description") or "").strip()
     temp = weather.get("temp_c")
+    temp_min = weather.get("temp_min_c")
+    temp_max = weather.get("temp_max_c")
     wind = weather.get("wind_kmh")
-    line = f"• Tham khảo hiện tại tại {location}:"
+    rain_prob = weather.get("precipitation_probability_pct")
+    travel_window_label = str(weather.get("travel_window_label") or "").strip()
+    line = f"• Forecast tham khảo tại {location}"
+    if travel_window_label:
+        line += f" cho {travel_window_label}"
+    line += ":"
     detail_bits: list[str] = []
     if description:
         detail_bits.append(description)
     if isinstance(temp, (int, float)):
         detail_bits.append(f"{float(temp):.1f}°C")
+    if isinstance(temp_min, (int, float)) and isinstance(temp_max, (int, float)):
+        detail_bits.append(f"dao động {float(temp_min):.1f}–{float(temp_max):.1f}°C")
+    if isinstance(rain_prob, (int, float)):
+        detail_bits.append(f"xác suất mưa tối đa ~{int(round(float(rain_prob)))}%")
     if isinstance(wind, (int, float)):
         detail_bits.append(f"gió ~{float(wind):.0f} km/h")
     if detail_bits:
         line += " " + ", ".join(detail_bits) + "."
     out = [line]
+    out.extend(_bulletify(line) for line in (weather.get("advice_lines") or [])[:2])
     if mobility_plan:
         fastest = str(mobility_plan.get("fastest_mode_label") or "").strip()
         eta = mobility_plan.get("avg_eta_min")
@@ -417,17 +497,29 @@ def _format_weather_lines(
             else:
                 note += "."
             out.append(note)
-    out.append("• Nếu bạn thay đổi ngày đi, mình sẽ cập nhật lại dự báo thời tiết để tinh chỉnh lịch.")
+    out.append("• Nếu bạn đổi ngày đi hoặc muốn thay lại hoạt động, mình có thể cập nhật forecast và tinh chỉnh lịch tiếp.")
     return out
 
 
+def _format_weather_adjustment_lines(weather: dict[str, Any] | None) -> list[str]:
+    if not weather:
+        return []
+    if not _weather_is_specific(weather):
+        return []
+    return [_bulletify(line) for line in (weather.get("plan_adjustment_suggestions") or []) if str(line).strip()]
+
+
+def _weather_is_specific(weather: dict[str, Any] | None) -> bool:
+    return bool(weather) and str((weather or {}).get("forecast_status") or "").strip() == "forecast_available"
+
+
 def _is_day_header(line: str) -> bool:
-    return bool(re.match(r"^(NGAY|Ngày)\s+\d+", line, flags=re.IGNORECASE))
+    return bool(re.match(r"^(?:NGAY|Ngày|NGÀY)\s+\d+", line, flags=re.IGNORECASE))
 
 
 def _format_day_header(line: str) -> str:
-    """Normalise legacy 'NGAY 1 - THEME' and new 'Ngày 1 — Theme' headers."""
-    match = re.match(r"^(?:NGAY|Ngày)\s+(\d+)\s*[-—:]?\s*(.*)$", line, flags=re.IGNORECASE)
+    """Normalise legacy 'NGAY 1 - THEME' và 'Ngày 1 — Theme' thành tiêu đề hiển thị thống nhất."""
+    match = re.match(r"^(?:NGAY|Ngày|NGÀY)\s+(\d+)\s*[-—:]?\s*(.*)$", line, flags=re.IGNORECASE)
     if not match:
         return line
     day = match.group(1)

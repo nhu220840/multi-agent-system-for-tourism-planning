@@ -120,12 +120,14 @@ _CITY_NAME_PATTERNS: dict[str, tuple[str, ...]] = {
     "quang_nam": ("quang nam",),
 }
 _HOTEL_RELOCATION_THRESHOLD_KM = 30.0
+_MAX_EXTERNAL_HOTEL_QUERIES = 4
+_MAX_EXTERNAL_EMERGENCY_FOOD_QUERIES = 5
 
 
 def build_trip_plan_payload(query: str, places: List[dict], strict_mode: bool = False) -> dict:
     if not places:
         return {
-            "plan": "Khong du du lieu de goi y lich trinh.",
+            "plan": "Không đủ dữ liệu để gợi ý lịch trình.",
             "stay_plan": {"segments": [], "change_hotel": False},
             "recommended_hotel": None,
         }
@@ -159,9 +161,9 @@ def build_trip_plan_payload(query: str, places: List[dict], strict_mode: bool = 
     if not destinations:
         destinations = [p for p in places if str(p.get("category") or "").lower() != "restaurant"]
 
-    destination_name = _extract_city(query, places).upper()
+    destination_label = _extract_city(query, places)
     lines: List[str] = [
-        f"LICH TRINH {total_days} NGAY TAI {destination_name}",
+        f"LỊCH TRÌNH {total_days} NGÀY TẠI {destination_label.upper()}",
         "",
     ]
     route_plan: List[dict] = []
@@ -222,7 +224,7 @@ def build_trip_plan_payload(query: str, places: List[dict], strict_mode: bool = 
     if stay_plan.get("segments"):
         lines.extend(
             [
-                "GOI Y NOI NGHI:",
+                "GỢI Ý NƠI NGHỈ:",
                 *[
                     _stay_segment_line(segment)
                     for segment in stay_plan.get("segments", [])
@@ -272,28 +274,28 @@ def build_trip_plan_payload(query: str, places: List[dict], strict_mode: bool = 
         lines.extend(
             [
                 "",
-                f"NGAY {day} - {day_theme}",
+                f"Ngày {day} — {day_theme}",
                 _meal_and_activity_line(
-                    slot="Sang",
+                    slot="Sáng",
                     meal_kind="breakfast",
                     meal_place=breakfast,
                     activity_text=morning_action,
                     activity_place=morning,
                 ),
                 _meal_and_activity_line(
-                    slot="Trua",
+                    slot="Trưa",
                     meal_kind="lunch",
                     meal_place=lunch,
                 ),
                 _meal_and_activity_line(
-                    slot="Chieu",
+                    slot="Chiều",
                     meal_kind="",
                     meal_place=None,
                     activity_text=afternoon_action,
                     activity_place=afternoon,
                 ),
                 _meal_and_activity_line(
-                    slot="Toi",
+                    slot="Tối",
                     meal_kind="dinner",
                     meal_place=dinner,
                     activity_text=evening_action,
@@ -307,8 +309,8 @@ def build_trip_plan_payload(query: str, places: List[dict], strict_mode: bool = 
     lines.extend(
         [
             "",
-            "Goi y tong quan: Lich trinh can bang giua tham quan, trai nghiem dia phuong va di chuyen hop ly.",
-            "Luu y: Co the dieu chinh khung gio theo thoi tiet va gio mo cua thuc te.",
+            "Gợi ý tổng quan: Lịch trình cân bằng giữa tham quan, trải nghiệm địa phương và di chuyển hợp lý.",
+            "Lưu ý: Có thể điều chỉnh khung giờ theo thời tiết và giờ mở cửa thực tế.",
         ]
     )
     return {
@@ -334,7 +336,11 @@ def _place_key(p: dict | None) -> str:
 
 
 def _is_self_service_meal(place: dict | None) -> bool:
-    name = str((place or {}).get("name") or "").strip().lower()
+    if not place:
+        return False
+    if str(place.get("source") or "").strip() == "fallback-self-service":
+        return True
+    name = str(place.get("name") or "").strip().lower()
     return "tu tuc" in name or "tự túc" in name
 
 
@@ -368,22 +374,22 @@ def _meal_and_activity_line(
 
 def _meal_sentence(meal_kind: str, meal_place: dict | None) -> str:
     meal_map = {
-        "breakfast": ("bua sang", "An sang"),
-        "lunch": ("bua trua", "An trua"),
-        "dinner": ("bua toi", "An toi"),
+        "breakfast": ("bữa sáng",),
+        "lunch": ("bữa trưa",),
+        "dinner": ("bữa tối",),
     }
-    meal_label, fallback_label = meal_map.get(meal_kind, ("bua an", "An uong"))
+    meal_label = meal_map.get(meal_kind, ("bữa ăn trong ngày",))[0]
     if _is_self_service_meal(meal_place):
-        return f"Tu tuc {meal_label} vi chua tim thay dia diem phu hop gan hanh trinh."
+        return f"Tự túc {meal_label} vì chưa tìm thấy địa điểm phù hợp gần hành trình."
 
-    place_name = _fmt(meal_place) if meal_place else fallback_label
+    place_name = _fmt(meal_place) if meal_place else "điểm ăn uống gần tuyến"
     if meal_kind == "breakfast":
-        return f"Bat dau ngay moi voi bua sang tai {place_name}."
+        return f"Bắt đầu ngày mới với bữa sáng tại {place_name}."
     if meal_kind == "lunch":
-        return f"Dung bua trua tai {place_name}."
+        return f"Dùng bữa trưa tại {place_name}."
     if meal_kind == "dinner":
-        return f"Dung bua toi tai {place_name}."
-    return f"Ghe {place_name} cho bua an trong ngay."
+        return f"Dùng bữa tối tại {place_name}."
+    return f"Ghé {place_name} cho bữa ăn trong ngày."
 
 
 def _activity_sentence(
@@ -399,28 +405,32 @@ def _activity_sentence(
     if not action and not include_evening_stroll:
         return ""
 
-    if slot == "Sang" and action and target:
-        return f"Sau do, ban co the {action} tai {target}."
-    if slot == "Chieu" and action and target:
-        return f"Buoi chieu phu hop de {action} tai {target}."
-    if slot == "Toi":
+    if slot == "Sáng" and action and target:
+        return f"Sau đó, bạn có thể {action} tại {target}."
+    if slot == "Chiều" and action and target:
+        return f"Buổi chiều phù hợp để {action} tại {target}."
+    if slot == "Tối":
         phrases: list[str] = []
         if action and target:
-            phrases.append(f"Buoi toi, ban co the {action} tai {target}.")
+            phrases.append(f"Buổi tối, bạn có thể {action} tại {target}.")
         elif action:
-            phrases.append(f"Buoi toi, ban co the {action}.")
+            phrases.append(f"Buổi tối, bạn có thể {action}.")
         if include_evening_stroll:
             stroll_target = _fmt(fallback_place or activity_place) if (fallback_place or activity_place) else ""
             if stroll_target and not _is_self_service_meal(fallback_place or activity_place):
-                phrases.append(f"Sau bua toi, danh it thoi gian di dao va thu gian quanh khu vuc {stroll_target}.")
+                phrases.append(
+                    f"Sau bữa tối, dành ít thời gian đi dạo và thư giãn quanh khu vực {stroll_target}."
+                )
             else:
-                phrases.append("Sau bua toi, ban co the di dao nhe va thu gian quanh khu vuc luu tru.")
+                phrases.append(
+                    "Sau bữa tối, bạn có thể đi dạo nhẹ và thư giãn quanh khu vực lưu trú."
+                )
         return " ".join(phrases).strip()
 
     if action and target:
-        return f"Ban co the {action} tai {target}."
+        return f"Bạn có thể {action} tại {target}."
     if action:
-        return f"Ban co the {action}."
+        return f"Bạn có thể {action}."
     return ""
 
 
@@ -1372,8 +1382,8 @@ def _query_external_accommodations(
     queries = _external_hotel_queries(city_label=city_label, anchors=anchors)
     out: List[dict] = []
     seen: set[str] = set()
-    for query in queries:
-        raw = search_places(query, limit=max(20, need * 6))
+    for query in queries[:_MAX_EXTERNAL_HOTEL_QUERIES]:
+        raw = search_places(query, limit=max(12, need * 4))
         for item in raw:
             name = str(item.get("name") or "").strip()
             if not name:
@@ -1458,10 +1468,10 @@ def _looks_like_accommodation(item: dict) -> bool:
 
 def _city_label_from_key(city_key: str, default_city: str = "") -> str:
     labels = {
-        "da_nang": "Da Nang",
-        "hoi_an": "Hoi An, Quang Nam",
-        "quang_nam": "Quang Nam",
-        "tam_ky": "Tam Ky, Quang Nam",
+        "da_nang": "Đà Nẵng",
+        "hoi_an": "Hội An, Quảng Nam",
+        "quang_nam": "Quảng Nam",
+        "tam_ky": "Tam Kỳ, Quảng Nam",
     }
     return labels.get(city_key, default_city or city_key.replace("_", " ").title())
 
@@ -1470,15 +1480,15 @@ def _days_label(days: List[int]) -> str:
     if not days:
         return ""
     if len(days) == 1:
-        return f"ngay {days[0]}"
-    return f"ngay {days[0]}-{days[-1]}"
+        return f"Ngày {days[0]}"
+    return f"Ngày {days[0]}–{days[-1]}"
 
 
 def _stay_segment_line(segment: dict) -> str:
     hotel = segment.get("hotel")
     if hotel:
-        return f"• {segment.get('days_label')}: o tai {_fmt(hotel)}"
-    return f"• {segment.get('days_label')}: chua tim thay khach san phu hop trong/ngoai database"
+        return f"• {segment.get('days_label')}: nghỉ tại {_fmt(hotel)}"
+    return f"• {segment.get('days_label')}: chưa tìm thấy khách sạn phù hợp trong dữ liệu"
 
 
 def _recommended_hotel_from_stay_plan(stay_plan: dict) -> dict | None:
@@ -1492,7 +1502,7 @@ def _recommended_hotel_from_stay_plan(stay_plan: dict) -> dict | None:
         return hotel or None
     return {
         "type": "multi_city_stay",
-        "reason": "Doi khach san theo tung cum ngay xa hon 30km de toi uu di chuyen, sau do quay ve khach san chinh.",
+        "reason": "Đổi khách sạn theo từng cụm ngày khi cự ly vượt ~30 km để tối ưu di chuyển, sau đó quay về khách sạn chính.",
         "segments": [
             {
                 "days": segment.get("days", []),
@@ -2025,7 +2035,7 @@ def _query_external_with_radius_fallback(
         city=city,
         anchors=anchors,
         used_names=used_names,
-        need=max(need * 4, 24),
+        need=max(need * 2, 12),
         target_city_key=target_city_key,
         required_area_keys=required_area_keys,
         meal_anchor=meal_anchor,
@@ -2104,8 +2114,8 @@ def _query_external_food_emergency(
     out: List[tuple[float, dict]] = []
     seen = set(used_names)
     anchor_pts = [a for a in anchors if a]
-    for q in queries:
-        raw = search_places(q, limit=max(30, need * 10))
+    for q in queries[:_MAX_EXTERNAL_EMERGENCY_FOOD_QUERIES]:
+        raw = search_places(q, limit=max(20, need * 6))
         if not raw:
             continue
         for r in raw:
@@ -2279,13 +2289,8 @@ def _distance_to_route_segment_km(p: dict, a: dict | None, b: dict | None) -> fl
 
 
 def _restaurant_missing_placeholder(meal: str = "") -> dict:
-    meal_label = {
-        "breakfast": "An sang",
-        "lunch": "An trua",
-        "dinner": "An toi",
-    }.get(meal, "An uong")
     return {
-        "name": f"{meal_label} tu tuc (khong tim thay dia diem phu hop gan hanh trinh)",
+        "name": "Tự túc (chưa có nhà hàng gần tuyến trong dữ liệu)",
         "address": "",
         "category": "restaurant",
         "source": "fallback-self-service",
@@ -2305,7 +2310,7 @@ def _extract_city(query: str, places: List[dict]) -> str:
         city = str(p.get("city") or "").strip()
         if city:
             return city
-    return "Da Nang"
+    return "Đà Nẵng"
 
 
 def _fmt(p: dict | None) -> str:
@@ -2334,9 +2339,9 @@ def _with_pick_reason(p: dict | None, reason: str) -> dict | None:
 
 def _day_theme_label(day: int, total_days: int, morning: dict | None, afternoon: dict | None) -> str:
     if day == 1:
-        return "KHOI DONG & LAM QUEN DIEM DEN"
+        return "Khởi động & làm quen điểm đến"
     if day == total_days:
-        return "TONG KET & TRAI NGHIEM CUOI"
+        return "Tổng kết & trải nghiệm cuối"
     blob = _fold(
         " ".join(
             [
@@ -2348,17 +2353,17 @@ def _day_theme_label(day: int, total_days: int, morning: dict | None, afternoon:
         )
     )
     if any(k in blob for k in ("bao tang", "museum", "chua", "dinh", "thanh dia", "di tich", "van hoa")):
-        return "VAN HOA & DI SAN"
+        return "Văn hóa & di sản"
     if any(k in blob for k in ("beach", "bai bien", "bien", "son tra", "ban dao", "doi", "nui")):
-        return "THIEN NHIEN & CANH QUAN"
+        return "Thiên nhiên & cảnh quan"
     if any(k in blob for k in ("market", "cho", "pho", "night", "giai tri", "cong vien")):
-        return "NHI P SONG DIA PHUONG"
-    return "KHAM PHA DA CHU DE"
+        return "Nhịp sống địa phương"
+    return "Khám phá đa chủ đề"
 
 
 def _slot_action_text(slot: str, place: dict | None, day: int) -> str:
     if not place:
-        return "tu do kham pha"
+        return "tự do khám phá"
     cat = str(place.get("category") or "").lower()
     name_blob = _fold(str(place.get("name") or ""))
     desc_blob = _fold(str(place.get("description") or ""))
@@ -2389,39 +2394,103 @@ def _slot_action_text(slot: str, place: dict | None, day: int) -> str:
 
     if slot == "morning":
         if is_museum:
-            options = ["tham quan bo suu tap chinh", "tim hieu lich su van hoa", "check-in khu trung bay noi bat"]
+            options = [
+                "tham quan bộ sưu tập chính",
+                "tìm hiểu lịch sử văn hoá",
+                "check-in khu trưng bày nổi bật",
+            ]
         elif is_spiritual and not is_nature:
-            options = ["tham quan khu tam linh", "tim hieu gia tri di san", "di bo va chup anh canh quan"]
+            options = [
+                "tham quan khu tâm linh",
+                "tìm hiểu giá trị di sản",
+                "đi bộ và chụp ảnh cảnh quan",
+            ]
         elif is_beach:
-            options = ["tan bo bo bien", "ngam canh va chup anh buoi sang", "thu gian nhe truoc khi di chuyen"]
+            options = [
+                "tản bộ bờ biển",
+                "ngắm cảnh và chụp ảnh buổi sáng",
+                "thư giãn nhẹ trước khi di chuyển",
+            ]
         elif is_hot_spring:
-            options = ["thu gian voi khong gian suoi khoang", "tan huong khong khi trong lanh va nghi duong", "kham pha khu sinh thai va chup anh"]
+            options = [
+                "thư giãn với không gian suối khoáng",
+                "tận hưởng không khí trong lành và nghỉ dưỡng",
+                "khám phá khu sinh thái và chụp ảnh",
+            ]
         elif is_nature:
-            options = ["kham pha canh quan thien nhien", "di bo ngam canh va chup anh", "thu gian giua khong gian xanh"]
+            options = [
+                "khám phá cảnh quan thiên nhiên",
+                "đi bộ ngắm cảnh và chụp ảnh",
+                "thư giãn giữa không gian xanh",
+            ]
         elif is_culture:
-            options = ["tim hieu gia tri di san", "kham pha dau an van hoa dia phuong", "tham quan diem lich su noi bat"]
+            options = [
+                "tìm hiểu giá trị di sản",
+                "khám phá dấu ấn văn hoá địa phương",
+                "tham quan điểm lịch sử nổi bật",
+            ]
         else:
-            options = ["kham pha diem noi bat", "tham quan khu vuc trung tam", "check-in diem tham quan chinh"]
+            options = [
+                "khám phá điểm nổi bật",
+                "tham quan khu vực trung tâm",
+                "check-in điểm tham quan chính",
+            ]
     elif slot == "afternoon":
         if is_shopping:
-            options = ["tham quan khu mua sam/pho di bo", "dạo quanh khu nhon nhip va mua sam nhe", "kham pha khong gian cho dem/pho di bo"]
+            options = [
+                "tham quan khu mua sắm / phố đi bộ",
+                "dạo quanh khu nhộn nhịp và mua sắm nhẹ",
+                "khám phá không gian chợ đêm / phố đi bộ",
+            ]
         elif is_hot_spring:
-            options = ["thu gian voi dich vu suoi khoang va nghi duong", "tan huong khong gian sinh thai va thu gian", "trai nghiem cac hoat dong thu gian tai khu suoi khoang"]
+            options = [
+                "thư giãn với dịch vụ suối khoáng và nghỉ dưỡng",
+                "tận hưởng không gian sinh thái và thư giãn",
+                "trải nghiệm hoạt động thư giãn tại khu suối khoáng",
+            ]
         elif is_nature:
-            options = ["kham pha thien nhien va ngam canh", "di bo tham quan cac goc canh quan noi bat", "thu gian va trai nghiem khong gian ngoai troi"]
+            options = [
+                "khám phá thiên nhiên và ngắm cảnh",
+                "đi bộ tham quan các góc cảnh quan nổi bật",
+                "thư giãn và trải nghiệm không gian ngoài trời",
+            ]
         elif cat == "entertainment" or any(k in blob for k in ("giai tri", "cong vien", "vui choi")):
-            options = ["trai nghiem hoat dong giai tri", "di bo va tan huong khong gian dia phuong", "thu cac hoat dong dia phuong"]
+            options = [
+                "trải nghiệm hoạt động giải trí",
+                "đi bộ và tận hưởng không gian địa phương",
+                "thử các hoạt động địa phương",
+            ]
         elif is_viewpoint:
-            options = ["len diem nhin toan canh", "chup anh khung gio dep", "thu gian va ngam canh"]
+            options = [
+                "lên điểm nhìn toàn cảnh",
+                "chụp ảnh khung giờ đẹp",
+                "thư giãn và ngắm cảnh",
+            ]
         elif is_culture or is_spiritual:
-            options = ["tham quan them cac goc van hoa noi bat", "tiep tuc kham pha gia tri lich su dia phuong", "trai nghiem khong gian van hoa dac trung"]
+            options = [
+                "tham quan thêm các góc văn hoá nổi bật",
+                "tiếp tục khám phá giá trị lịch sử địa phương",
+                "trải nghiệm không gian văn hoá đặc trưng",
+            ]
         else:
-            options = ["kham pha diem vui choi", "tham quan them cac goc noi bat", "trai nghiem van hoa ban dia"]
+            options = [
+                "khám phá điểm vui chơi",
+                "tham quan thêm các góc nổi bật",
+                "trải nghiệm văn hoá bản địa",
+            ]
     else:
         if any(k in blob for k in ("seafood", "hai san", "bbq", "grill", "lau", "nuong")):
-            options = ["thu mon dac san buoi toi", "thuong thuc bua toi dam chat dia phuong", "ket hop an toi va thu gian"]
+            options = [
+                "thử món đặc sản buổi tối",
+                "thưởng thức bữa tối đậm chất địa phương",
+                "kết hợp ăn tối và thư giãn",
+            ]
         else:
-            options = ["thuong thuc am thuc dia phuong", "di dao khu vuc nhon nhip", "ket thuc ngay voi khong gian chill"]
+            options = [
+                "thưởng thức ẩm thực địa phương",
+                "đi dạo khu vực nhộn nhịp",
+                "kết thúc ngày với không gian thư giãn",
+            ]
     return options[(day - 1) % len(options)]
 
 
@@ -2446,12 +2515,12 @@ def _build_day_route_plan(
 ) -> List[dict]:
     route_plan: List[dict] = []
     legs = [
-        ("Khoi hanh", start_hotel, breakfast),
-        ("Sang", breakfast, morning),
-        ("Trua", morning, lunch),
-        ("Chieu", lunch, afternoon),
-        ("Toi", afternoon, dinner),
-        ("Ve khach san", dinner, end_hotel),
+        ("Khởi hành", start_hotel, breakfast),
+        ("Sáng", breakfast, morning),
+        ("Trưa", morning, lunch),
+        ("Chiều", lunch, afternoon),
+        ("Tối", afternoon, dinner),
+        ("Về khách sạn", dinner, end_hotel),
     ]
     for sequence, (leg_label, origin, destination) in enumerate(legs, start=1):
         leg = _build_route_leg(
@@ -2483,7 +2552,7 @@ def _build_route_leg(
 
     payload: dict[str, object] = {
         "day": day,
-        "day_label": f"Ngay {day}",
+        "day_label": f"Ngày {day}",
         "sequence": sequence,
         "leg_label": leg_label,
         "from": from_name,
@@ -2526,7 +2595,7 @@ def _build_route_leg(
     if not same_place and km < 0.2:
         km = 0.2
     eta_min = max(5, int(round(km / 28 * 60)))
-    mode_label = "di bo" if km <= 1.0 else "Grab hoac oto"
+    mode_label = "đi bộ" if km <= 1.0 else "Grab hoặc ô tô"
     payload.update(
         {
             "distance_km": round(km, 2),
@@ -2552,10 +2621,10 @@ def _resolve_segment_points(
 
 def _fastest_route_by_map(origin: GeoPoint, destination: GeoPoint) -> dict | None:
     mode_labels = {
-        "car": "oto / Grab",
-        "truck": "xe tai",
-        "scooter": "xe may",
-        "pedestrian": "di bo",
+        "car": "ô tô / Grab",
+        "truck": "xe tải",
+        "scooter": "xe máy",
+        "pedestrian": "đi bộ",
     }
     best: dict | None = None
     for mode in configured_route_modes():

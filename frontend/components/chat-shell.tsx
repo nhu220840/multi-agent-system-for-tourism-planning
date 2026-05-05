@@ -8,6 +8,7 @@ import {
   type ConversationSummary,
   type DebugStep,
   type Principal,
+  deleteAllConversations,
   deleteConversation,
   getConversation,
   initSession,
@@ -93,10 +94,16 @@ type ConversationViewState = {
   followUps: string[];
   trace: string[];
   debugSteps: DebugStep[];
+  conversationStage: string | null;
+  pendingMode: "intake" | "planning" | null;
   pendingStartedAt: number | null;
 };
 
 const URL_PATTERN = /https?:\/\/[^\s]+/g;
+const STARTER_ASSISTANT_MESSAGE =
+  "Chào bạn, mình là chatbot tư vấn lập kế hoạch du lịch Đà Nẵng. " +
+  "Mình sẽ hỏi bạn từng câu ngắn để gom đủ thông tin, sau đó tổng hợp lại và lên lịch trình phù hợp.\n\n" +
+  "Trước tiên: Bạn dự định đi mấy ngày?";
 
 function createConversationViewState(conversationId: string | null = null): ConversationViewState {
   return {
@@ -105,6 +112,8 @@ function createConversationViewState(conversationId: string | null = null): Conv
     followUps: [],
     trace: [],
     debugSteps: [],
+    conversationStage: null,
+    pendingMode: null,
     pendingStartedAt: null,
   };
 }
@@ -144,9 +153,10 @@ function extractConversationSignals(conversation: ConversationDetail | null): {
   followUps: string[];
   trace: string[];
   debugSteps: DebugStep[];
+  conversationStage: string | null;
 } {
   if (!conversation) {
-    return { followUps: [], trace: [], debugSteps: [] };
+    return { followUps: [], trace: [], debugSteps: [], conversationStage: null };
   }
 
   for (let index = conversation.messages.length - 1; index >= 0; index -= 1) {
@@ -162,10 +172,14 @@ function extractConversationSignals(conversation: ConversationDetail | null): {
     const debugSteps = Array.isArray((message.metadata as { debug_steps?: DebugStep[] }).debug_steps)
       ? ((message.metadata as { debug_steps?: DebugStep[] }).debug_steps || [])
       : [];
-    return { followUps, trace, debugSteps };
+    const conversationStage =
+      typeof (message.metadata as { conversation_stage?: string }).conversation_stage === "string"
+        ? String((message.metadata as { conversation_stage?: string }).conversation_stage)
+        : null;
+    return { followUps, trace, debugSteps, conversationStage };
   }
 
-  return { followUps: [], trace: [], debugSteps: [] };
+  return { followUps: [], trace: [], debugSteps: [], conversationStage: null };
 }
 
 type PendingStepBlueprint = {
@@ -225,9 +239,8 @@ function formatElapsedMs(ms: number): string {
 
 function buildPendingDebugSteps(elapsedMs: number): DebugStep[] {
   let offsetMs = 0;
-  const lastIndex = PENDING_STEP_BLUEPRINTS.length - 1;
 
-  return PENDING_STEP_BLUEPRINTS.map((step, index) => {
+  return PENDING_STEP_BLUEPRINTS.map((step) => {
     const startMs = offsetMs;
     const endMs = offsetMs + step.durationMs;
     offsetMs = endMs;
@@ -236,11 +249,7 @@ function buildPendingDebugSteps(elapsedMs: number): DebugStep[] {
     let summary = step.queuedSummary;
     let elapsedForStep = 0;
 
-    if (index === lastIndex && elapsedMs >= startMs) {
-      status = "running";
-      summary = step.runningSummary;
-      elapsedForStep = Math.max(0, elapsedMs - startMs);
-    } else if (elapsedMs >= endMs) {
+    if (elapsedMs >= endMs) {
       status = "done";
       summary = step.doneSummary;
       elapsedForStep = step.durationMs;
@@ -268,6 +277,41 @@ function buildTraceSteps(steps: DebugStep[]): Array<{ label: string; status: str
     label: stripStepNumber(step.title),
     status: step.status,
   }));
+}
+
+function isIntakeStage(stage: string | null | undefined): boolean {
+  return (stage || "").trim().toLowerCase() === "intake";
+}
+
+function latestAssistantMetadata(messages: DraftMessage[]): AssistantMessageMetadata | null {
+  for (let index = messages.length - 1; index >= 0; index -= 1) {
+    const message = messages[index];
+    if (message.role !== "assistant" || !message.metadata || typeof message.metadata !== "object") {
+      continue;
+    }
+    return message.metadata as AssistantMessageMetadata;
+  }
+  return null;
+}
+
+function inferPendingMode(
+  state: ConversationViewState,
+  currentAnswer: string,
+): "intake" | "planning" {
+  if (!isIntakeStage(state.conversationStage)) {
+    return "planning";
+  }
+
+  const metadata = latestAssistantMetadata(state.messages);
+  const missingFields = Array.isArray(metadata?.missing_fields)
+    ? metadata?.missing_fields?.filter((item) => typeof item === "string" && String(item).trim())
+    : [];
+
+  if (missingFields.length <= 1 && currentAnswer.trim()) {
+    return "planning";
+  }
+
+  return "intake";
 }
 
 function statusLabel(status: string): string {
@@ -318,6 +362,16 @@ function readString(value: unknown): string {
   return typeof value === "string" ? value.trim() : "";
 }
 
+function toFriendlySubmitError(error: unknown): string {
+  if (error instanceof Error && error.message.trim()) {
+    if (/timed out/i.test(error.message)) {
+      return "Backend phản hồi quá lâu (timeout). Vui lòng thử lại hoặc rút gọn yêu cầu để hệ thống xử lý nhanh hơn.";
+    }
+    return error.message;
+  }
+  return "Không thể kết nối tới backend. Vui lòng thử lại.";
+}
+
 function truncateMiddle(value: string, maxLength = 48): string {
   if (value.length <= maxLength) {
     return value;
@@ -331,14 +385,14 @@ function linkLabelForLine(url: string, line: string, index: number): string {
   if (url.includes("/routes/") && url.includes("maps.track-asia.com")) {
     return "Chỉ đường";
   }
-  if (lower.includes("ban do tuyen ngay")) {
-    return index > 0 ? `Mo tuyen ${index + 1}` : "Mo tuyen";
+  if (lower.includes("ban do tuyen ngay") || lower.includes("bản đồ tuyến ngày")) {
+    return index > 0 ? `Mở tuyến ${index + 1}` : "Mở tuyến";
   }
-  if (lower.includes("map tung chang")) {
-    return `Map chang ${index + 1}`;
+  if (lower.includes("map tung chang") || lower.includes("bản đồ từng chặng")) {
+    return `Bản đồ chặng ${index + 1}`;
   }
   if (lower.includes(" map:")) {
-    return index > 0 ? `Mo map ${index + 1}` : "Mo map";
+    return index > 0 ? `Mở map ${index + 1}` : "Mở map";
   }
   if (url.includes("/place/") && url.includes("maps.track-asia.com")) {
     return "Xem map";
@@ -551,7 +605,7 @@ function renderMessageLine(line: string, index: number): ReactNode {
   let displayLine = normalizedLine;
   if (/^(KẾ HOẠCH DU LỊCH GỢI Ý|KE HOACH DU LICH GOI Y)/i.test(trimmed)) {
     className += " is-heading";
-  } else if (/^Ngày\s+\d+/i.test(trimmed) || /^NGAY\s+\d+/i.test(trimmed)) {
+  } else if (/^(?:▸\s*)?Ngày\s+\d+/i.test(trimmed) || /^(?:▸\s*)?NGAY\s+\d+/i.test(trimmed) || /^▸\s*Ngày/i.test(trimmed)) {
     className += " is-day";
   } else if (trimmed.endsWith(":") && !trimmed.startsWith("http")) {
     className += " is-section";
@@ -586,10 +640,10 @@ function renderMessageContent(content: string): ReactNode {
 function extractPlaceNames(line: string): string[] {
   const names: string[] = [];
   const seen = new Set<string>();
-  const pattern = /\btai\s+([^(\n.;]+?)(?=\s*(?:\(|—|\.|;|$))/gi;
+  const pattern = /\btại\s+([^(\n.;]+?)(?=\s*(?:\(|—|\.|;|$))|\btai\s+([^(\n.;]+?)(?=\s*(?:\(|—|\.|;|$))/gi;
 
   for (const match of line.matchAll(pattern)) {
-    const name = match[1]?.replace(/\s+/g, " ").replace(/^[,\-\s]+|[,\-\s]+$/g, "").trim();
+    const name = (match[1] ?? match[2])?.replace(/\s+/g, " ").replace(/^[,\-\s]+|[,\-\s]+$/g, "").trim();
     if (!name) {
       continue;
     }
@@ -658,7 +712,7 @@ function parsePlanDays(planText: string): DaySummary[] {
       continue;
     }
 
-    const dayMatch = line.match(/^(?:NGAY|Ngày)\s+(\d+)(?:\s*[-—]\s*(.+))?/i);
+    const dayMatch = line.match(/^(?:▸\s*)?(?:NGAY|Ngày|NGÀY)\s+(\d+)(?:\s*[-—]\s*(.+))?/i);
     if (dayMatch) {
       if (currentDay) {
         days.push(currentDay);
@@ -938,12 +992,18 @@ function SummaryPanel({
   snapshot,
   followUps,
   isPending,
+  conversationStage,
+  pendingMode,
 }: {
   snapshot: PlannerSnapshot | null;
   followUps: string[];
   isPending: boolean;
+  conversationStage: string | null;
+  pendingMode: "intake" | "planning" | null;
 }) {
   const nextPrompt = snapshot?.followUp || followUps[0] || null;
+  const awaitingMoreInfo = isIntakeStage(conversationStage);
+  const pendingPlanning = isPending && pendingMode === "planning";
 
   if (!snapshot?.hasPlan) {
     return (
@@ -951,15 +1011,31 @@ function SummaryPanel({
         <div className="summary-panel-head">
           <span className="summary-kicker">Quick tab</span>
           <h3>Tóm tắt nhanh</h3>
-          <p>Khung này sẽ rút gọn thông tin chính từng ngày để dễ theo dõi và nhớ nhanh.</p>
+          <p>
+            {awaitingMoreInfo
+              ? "Mình đang ở bước intake: hỏi từng câu để lấy đủ thông tin trước khi bắt đầu planning."
+              : "Khung này sẽ rút gọn thông tin chính từng ngày để dễ theo dõi và nhớ nhanh."}
+          </p>
         </div>
 
         <div className="summary-empty">
-          <strong>{isPending ? "Đang tổng hợp lịch trình..." : "Chưa có lịch trình để tóm tắt."}</strong>
+          <strong>
+            {pendingPlanning
+              ? "Đang tổng hợp lịch trình..."
+              : isPending
+                ? "Đang kiểm tra câu trả lời mới."
+              : awaitingMoreInfo
+                ? "Đang thu thập thêm thông tin."
+                : "Chưa có lịch trình để tóm tắt."}
+          </strong>
           <p>
-            {isPending
+            {pendingPlanning
               ? "Khi planner xong, bên này sẽ hiển thị ngày, địa điểm chính và link mở map ngắn gọn."
-              : "Gửi thêm yêu cầu về điểm đến, số ngày hoặc ngân sách để mình điền vào đây."}
+              : isPending
+                ? "Nếu thông tin bạn vừa gửi đã đủ, hệ thống sẽ chuyển sang planning ngay sau bước kiểm tra này."
+              : awaitingMoreInfo
+                ? "Chatbot sẽ tiếp tục hỏi từng câu. Khi đủ dữ liệu thì mới chuyển sang thinking/planning."
+                : "Gửi thêm yêu cầu về điểm đến, số ngày hoặc ngân sách để mình điền vào đây."}
           </p>
         </div>
 
@@ -1089,8 +1165,7 @@ export function ChatShell() {
   const [draft, setDraft] = useState("");
   const [status, setStatus] = useState("Connecting to FastAPI...");
   const [error, setError] = useState<string | null>(null);
-  const [historyClearing, setHistoryClearing] = useState(false);
-  const [deletingConversationKey, setDeletingConversationKey] = useState<string | null>(null);
+  const [conversationMutationPending, setConversationMutationPending] = useState(false);
   const [clockMs, setClockMs] = useState(() => Date.now());
   const activeConversationKeyRef = useRef<string | null>(null);
 
@@ -1106,6 +1181,8 @@ export function ChatShell() {
   const followUps = activeConversationState.followUps;
   const trace = activeConversationState.trace;
   const debugSteps = activeConversationState.debugSteps;
+  const conversationStage = activeConversationState.conversationStage;
+  const pendingMode = activeConversationState.pendingMode;
   const activeIsPending = activeConversationState.pendingStartedAt != null;
   const hasPendingConversations = Object.values(conversationStates).some((item) => item.pendingStartedAt != null);
   const pendingElapsedMs =
@@ -1157,6 +1234,8 @@ export function ChatShell() {
               followUps: signals.followUps,
               trace: signals.trace,
               debugSteps: signals.debugSteps,
+              conversationStage: signals.conversationStage,
+              pendingMode: null,
               pendingStartedAt: null,
             },
           }));
@@ -1201,6 +1280,19 @@ export function ChatShell() {
     return items;
   }
 
+  async function focusConversationAfterRemoval(items: ConversationListItem[]) {
+    const nextActive = items[0] ?? null;
+    setActiveConversationKey(nextActive?.key ?? null);
+    if (!nextActive) {
+      return;
+    }
+    const localState = conversationStates[nextActive.key];
+    if (localState?.messages.length || localState?.pendingStartedAt != null || !nextActive.conversationId) {
+      return;
+    }
+    await loadConversationIntoState(nextActive.key, nextActive.conversationId);
+  }
+
   async function loadConversationIntoState(key: string, conversationId: string) {
     const detail = await getConversation(conversationId);
     const signals = extractConversationSignals(detail);
@@ -1212,6 +1304,8 @@ export function ChatShell() {
         followUps: signals.followUps,
         trace: signals.trace,
         debugSteps: signals.debugSteps,
+        conversationStage: signals.conversationStage,
+        pendingMode: null,
         pendingStartedAt: null,
       },
     }));
@@ -1274,82 +1368,74 @@ export function ChatShell() {
     }
   }
 
-  async function handleDeleteConversationItem(
-    item: ConversationListItem,
-    event: MouseEvent<HTMLButtonElement>,
-  ) {
+  async function handleDeleteConversation(item: ConversationListItem, event: MouseEvent<HTMLButtonElement>) {
     event.stopPropagation();
-    if (historyClearing || activeIsPending || deletingConversationKey) {
+    if (conversationMutationPending) {
       return;
     }
-    if (!window.confirm(`Xóa conversation "${item.title}"?`)) {
+    const label = item.title === "New conversation" ? "this conversation" : `"${item.title}"`;
+    if (!window.confirm(`Delete ${label}?`)) {
       return;
     }
 
-    setDeletingConversationKey(item.key);
+    setConversationMutationPending(true);
     setError(null);
-    setStatus("Đang xóa conversation...");
+    setStatus("Deleting conversation...");
+
     try {
+      let nextServerItems = serverConversations;
+      const nextDraftItems = draftConversations.filter((draftItem) => draftItem.key !== item.key);
+
       if (item.conversationId) {
         await deleteConversation(item.conversationId);
+        const refreshed = await refreshServerConversations();
+        nextServerItems = refreshed.map(toConversationListItem);
       }
-      setServerConversations((current) => current.filter((conversation) => conversation.key !== item.key));
-      setDraftConversations((current) => current.filter((conversation) => conversation.key !== item.key));
+
+      setDraftConversations(nextDraftItems);
       setConversationStates((current) => {
         const updated = { ...current };
         delete updated[item.key];
         return updated;
       });
+
+      const nextItems = [...nextDraftItems, ...nextServerItems].filter((conversation) => conversation.key !== item.key);
       if (activeConversationKeyRef.current === item.key) {
-        setActiveConversationKey(null);
+        await focusConversationAfterRemoval(nextItems);
       }
-      setStatus("Đã xóa conversation");
+      setStatus(nextItems.length ? "Conversation deleted" : "Conversation history cleared");
     } catch (deleteError) {
-      setError(deleteError instanceof Error ? deleteError.message : "Không thể xóa conversation.");
-      setStatus("Xóa conversation thất bại");
+      setError(deleteError instanceof Error ? deleteError.message : "Conversation delete failed.");
+      setStatus("Conversation delete failed");
     } finally {
-      setDeletingConversationKey(null);
+      setConversationMutationPending(false);
     }
   }
 
-  async function handleClearConversation() {
-    if (historyClearing || activeIsPending || deletingConversationKey) {
+  async function handleDeleteAllConversations() {
+    if (conversationMutationPending) {
       return;
     }
-    const activeKey = activeConversationKeyRef.current;
-    if (!activeKey) {
-      return;
-    }
-    const activeItem = conversationItems.find((conversation) => conversation.key === activeKey);
-    if (!activeItem) {
-      return;
-    }
-    if (!window.confirm("Xóa conversation hiện tại?")) {
+    if (!window.confirm("Delete all saved conversation history?")) {
       return;
     }
 
-    setHistoryClearing(true);
+    setConversationMutationPending(true);
     setError(null);
-    setStatus("Đang xóa conversation hiện tại...");
+    setStatus("Clearing conversation history...");
+
     try {
-      if (activeItem.conversationId) {
-        await deleteConversation(activeItem.conversationId);
-      }
-      setServerConversations((current) => current.filter((conversation) => conversation.key !== activeKey));
-      setDraftConversations((current) => current.filter((conversation) => conversation.key !== activeKey));
-      setConversationStates((current) => {
-        const updated = { ...current };
-        delete updated[activeKey];
-        return updated;
-      });
+      await deleteAllConversations();
+      setServerConversations([]);
+      setDraftConversations([]);
+      setConversationStates({});
       setActiveConversationKey(null);
-      setDraft("");
-      setStatus("Đã xóa conversation hiện tại");
-    } catch (clearError) {
-      setError(clearError instanceof Error ? clearError.message : "Không thể xóa conversation hiện tại.");
-      setStatus("Xóa conversation thất bại");
+      setStatus("Conversation history cleared");
+    } catch (deleteError) {
+      setError(deleteError instanceof Error ? deleteError.message : "Conversation reset failed.");
+      setStatus("Conversation reset failed");
     } finally {
-      setHistoryClearing(false);
+      setConversationMutationPending(false);
     }
   }
 
@@ -1369,10 +1455,12 @@ export function ChatShell() {
     if (activeState.pendingStartedAt != null) {
       return;
     }
+    const pendingMode = inferPendingMode(activeState, content);
+    const pendingAssistantText = pendingMode === "planning" ? "Thinking..." : "Đang kiểm tra thông tin...";
 
     const optimisticId = `draft-${Date.now()}`;
     setError(null);
-    setStatus("FastAPI is planning your trip...");
+    setStatus(pendingMode === "planning" ? "FastAPI is planning your trip..." : "FastAPI is collecting trip details...");
     setDraft("");
     setConversationStates((current) => ({
       ...current,
@@ -1382,11 +1470,13 @@ export function ChatShell() {
         messages: [
           ...((current[conversationKey]?.messages || activeState.messages) ?? []),
           { id: optimisticId, role: "user", content },
-          { id: `${optimisticId}-assistant`, role: "assistant", content: "Thinking...", pending: true },
+          { id: `${optimisticId}-assistant`, role: "assistant", content: pendingAssistantText, pending: true },
         ],
         followUps: [],
         trace: [],
         debugSteps: [],
+        conversationStage: null,
+        pendingMode,
         pendingStartedAt: Date.now(),
       },
     }));
@@ -1412,6 +1502,8 @@ export function ChatShell() {
               followUps: signals.followUps,
               trace: signals.trace,
               debugSteps: signals.debugSteps,
+              conversationStage: signals.conversationStage,
+              pendingMode: null,
               pendingStartedAt: null,
             };
             if (conversationKey === nextKey) {
@@ -1438,6 +1530,9 @@ export function ChatShell() {
               followUps: response.follow_up_questions || [],
               trace: normalizeTrace(response.trace),
               debugSteps: response.debug_steps || [],
+              conversationStage: response.conversation_stage || null,
+              pendingMode: null,
+              conversationId: requestConversationId,
             },
           }));
         }
@@ -1455,16 +1550,17 @@ export function ChatShell() {
               message.id === `${optimisticId}-assistant`
                 ? {
                     ...message,
-                    content: "Không thể kết nối tới backend. Vui lòng thử lại.",
+                    content: toFriendlySubmitError(submitError),
                     pending: false,
                   }
                 : message,
             ),
+            pendingMode: null,
             pendingStartedAt: null,
           },
         }));
         if (activeConversationKeyRef.current === conversationKey) {
-          setError(submitError instanceof Error ? submitError.message : "Chat request failed.");
+          setError(toFriendlySubmitError(submitError));
           setStatus("Chat request failed");
         }
       }
@@ -1476,7 +1572,7 @@ export function ChatShell() {
       return;
     }
     event.preventDefault();
-    if (activeIsPending || historyClearing || !draft.trim()) {
+    if (activeIsPending || !draft.trim()) {
       return;
     }
     event.currentTarget.form?.requestSubmit();
@@ -1487,6 +1583,7 @@ export function ChatShell() {
   const plannerSnapshot = buildPlannerSnapshot(latestAssistantMessage);
   const pendingSteps = buildPendingDebugSteps(pendingElapsedMs);
   const traceSteps = activeIsPending ? buildTraceSteps(pendingSteps) : buildTraceSteps(debugSteps);
+  const shouldShowPlanningPanels = activeIsPending ? pendingMode === "planning" : !isIntakeStage(conversationStage);
 
   return (
     <main className="shell">
@@ -1495,8 +1592,7 @@ export function ChatShell() {
           <span className="eyebrow">Next.js + FastAPI</span>
           <h1>Travel planning UI on top of your FastAPI orchestration layer.</h1>
           <p>
-            The frontend owns the experience. FastAPI keeps the planner, session cookie, conversations,
-            and plans.
+            The frontend owns the experience. FastAPI keeps the planner, session cookie, and conversations.
           </p>
         </div>
 
@@ -1518,6 +1614,7 @@ export function ChatShell() {
           <button
             className="ghost-button"
             type="button"
+            disabled={conversationMutationPending}
             onClick={() => {
               const key = createDraftConversation();
               setActiveConversationKey(key);
@@ -1526,6 +1623,15 @@ export function ChatShell() {
             }}
           >
             Start new chat
+          </button>
+
+          <button
+            className="ghost-button ghost-button-danger"
+            type="button"
+            disabled={conversationMutationPending || conversationItems.length === 0}
+            onClick={handleDeleteAllConversations}
+          >
+            Clear all history
           </button>
 
           <div className="conversation-list">
@@ -1551,10 +1657,12 @@ export function ChatShell() {
                   <button
                     type="button"
                     className="conversation-delete"
-                    onClick={(event) => handleDeleteConversationItem(conversation, event)}
-                    disabled={historyClearing || activeIsPending || deletingConversationKey === conversation.key}
+                    disabled={conversationMutationPending}
+                    onClick={(event) => handleDeleteConversation(conversation, event)}
+                    aria-label={`Delete ${conversation.title}`}
+                    title="Delete conversation"
                   >
-                    {deletingConversationKey === conversation.key ? "Deleting..." : "Delete"}
+                    Delete
                   </button>
                 </div>
               ))
@@ -1568,14 +1676,6 @@ export function ChatShell() {
               <h2>Planner Console</h2>
               <p>Ask for an itinerary, then reuse the same conversation through the FastAPI session.</p>
             </div>
-            <button
-              className="secondary-button danger-button"
-              type="button"
-              onClick={handleClearConversation}
-              disabled={historyClearing || activeIsPending || deletingConversationKey != null || !activeConversationKey}
-            >
-              {historyClearing ? "Đang xóa..." : "Clear conversation"}
-            </button>
           </div>
 
           <div className="chat-body">
@@ -1583,8 +1683,11 @@ export function ChatShell() {
               <div className="message-list">
                 {canShowEmptyState ? (
                   <div className="empty-chat">
-                    <h3>Ready for the first request</h3>
-                    <p>Example: build a 3-day Da Nang itinerary with beach views and lower transport cost.</p>
+                    <article className="message-bubble assistant">
+                      <span className="message-role">Assistant</span>
+                      {renderMessageContent(STARTER_ASSISTANT_MESSAGE)}
+                    </article>
+                    <p>Bạn có thể trả lời ngắn như: "3 ngày", "2 ngày 1 đêm" hoặc "cuối tuần này".</p>
                   </div>
                 ) : (
                   messages.map((message) => (
@@ -1601,63 +1704,81 @@ export function ChatShell() {
                 )}
               </div>
 
-              <div className="trace-panel">
-                <div className="trace-header">
-                  <span>Thinking flow</span>
-                  <span>
-                    {activeIsPending
-                      ? `Running · ${formatElapsedMs(pendingElapsedMs)}`
-                      : trace.length > 0
-                        ? "Completed"
-                        : "Idle"}
-                  </span>
-                </div>
-                <div className="trace-list">
-                  {traceSteps.map((step, index) => (
-                    <span key={`${step.label}-${index}`} className={`trace-chip status-${step.status}`}>
-                      {index + 1}. {step.label}
-                    </span>
-                  ))}
-                  {!activeIsPending && trace.length === 0 ? <span className="trace-empty">No orchestration trace yet.</span> : null}
-                </div>
-              </div>
+              {shouldShowPlanningPanels ? (
+                <>
+                  <div className="trace-panel">
+                    <div className="trace-header">
+                      <span>Thinking flow</span>
+                      <span>
+                        {activeIsPending
+                          ? `Running · ${formatElapsedMs(pendingElapsedMs)}`
+                          : trace.length > 0
+                            ? "Completed"
+                            : "Idle"}
+                      </span>
+                    </div>
+                    <div className="trace-list">
+                      {traceSteps.map((step, index) => (
+                        <span key={`${step.label}-${index}`} className={`trace-chip status-${step.status}`}>
+                          {index + 1}. {step.label}
+                        </span>
+                      ))}
+                      {!activeIsPending && trace.length === 0 ? <span className="trace-empty">No orchestration trace yet.</span> : null}
+                    </div>
+                  </div>
 
-              <div className="debug-panel">
-                <div className="trace-header">
-                  <span>Step-by-step debug</span>
-                  <span>
-                    {activeIsPending
-                      ? `Tracking · ${formatElapsedMs(pendingElapsedMs)}`
-                      : debugSteps.length > 0
-                        ? `${debugSteps.length} steps`
-                        : "Idle"}
-                  </span>
-                </div>
-                <div className="debug-steps">
-                  {(activeIsPending ? pendingSteps : debugSteps).map((step) => (
-                    <article key={step.key} className="debug-step">
-                      <div className="debug-step-head">
-                        <strong>{step.title}</strong>
-                        <span className={`debug-status status-${step.status}`}>{statusLabel(step.status)}</span>
-                      </div>
-                      <p className="debug-summary">{step.summary}</p>
-                      {Object.keys(step.details || {}).length > 0 ? (
-                        <div className="debug-details">
-                          {Object.entries(step.details || {}).map(([key, value]) => (
-                            <div key={`${step.key}-${key}`} className="debug-detail-row">
-                              <span className="debug-detail-key">{key}</span>
-                              <pre className="debug-detail-value">{formatDebugValue(value)}</pre>
+                  <div className="debug-panel">
+                    <div className="trace-header">
+                      <span>Step-by-step debug</span>
+                      <span>
+                        {activeIsPending
+                          ? `Tracking · ${formatElapsedMs(pendingElapsedMs)}`
+                          : debugSteps.length > 0
+                            ? `${debugSteps.length} steps`
+                            : "Idle"}
+                      </span>
+                    </div>
+                    <div className="debug-steps">
+                      {(activeIsPending ? pendingSteps : debugSteps).map((step) => (
+                        <article key={step.key} className="debug-step">
+                          <div className="debug-step-head">
+                            <strong>{step.title}</strong>
+                            <span className={`debug-status status-${step.status}`}>{statusLabel(step.status)}</span>
+                          </div>
+                          <p className="debug-summary">{step.summary}</p>
+                          {Object.keys(step.details || {}).length > 0 ? (
+                            <div className="debug-details">
+                              {Object.entries(step.details || {}).map(([key, value]) => (
+                                <div key={`${step.key}-${key}`} className="debug-detail-row">
+                                  <span className="debug-detail-key">{key}</span>
+                                  <pre className="debug-detail-value">{formatDebugValue(value)}</pre>
+                                </div>
+                              ))}
                             </div>
-                          ))}
-                        </div>
+                          ) : null}
+                        </article>
+                      ))}
+                      {!activeIsPending && debugSteps.length === 0 ? (
+                        <span className="trace-empty">No debug steps available yet.</span>
                       ) : null}
-                    </article>
-                  ))}
-                  {!activeIsPending && debugSteps.length === 0 ? (
-                    <span className="trace-empty">No debug steps available yet.</span>
-                  ) : null}
+                    </div>
+                  </div>
+                </>
+              ) : (
+                <div className="trace-panel">
+                  <div className="trace-header">
+                    <span>Intake flow</span>
+                    <span>{activeIsPending ? "Checking latest answer" : "Collecting details"}</span>
+                  </div>
+                  <div className="trace-list">
+                    <span className="trace-chip status-needs_input">1. Chào hỏi và giới thiệu</span>
+                    <span className="trace-chip status-needs_input">2. Hỏi từng câu để lấy đủ thông tin</span>
+                    <span className={`trace-chip ${activeIsPending ? "status-running" : "status-waiting"}`}>
+                      3. Chỉ chuyển sang planning khi đã đủ dữ liệu
+                    </span>
+                  </div>
                 </div>
-              </div>
+              )}
 
               {followUps.length > 0 ? (
                 <div className="follow-ups">
@@ -1671,7 +1792,13 @@ export function ChatShell() {
               ) : null}
             </div>
 
-            <SummaryPanel snapshot={plannerSnapshot} followUps={followUps} isPending={activeIsPending} />
+            <SummaryPanel
+              snapshot={plannerSnapshot}
+              followUps={followUps}
+              isPending={activeIsPending}
+              conversationStage={conversationStage}
+              pendingMode={pendingMode}
+            />
           </div>
 
           <form className="composer" onSubmit={handleSubmit}>
@@ -1694,16 +1821,8 @@ export function ChatShell() {
                 <span className="hint-text">Nhấn Enter để gửi, Shift+Enter để xuống dòng.</span>
               )}
               <div className="composer-action-buttons">
-                <button
-                  className="secondary-button danger-button"
-                  type="button"
-                  onClick={handleClearConversation}
-                  disabled={historyClearing || activeIsPending || deletingConversationKey != null || !activeConversationKey}
-                >
-                  {historyClearing ? "Đang xóa..." : "Clear conversation"}
-                </button>
-                <button className="submit-button" type="submit" disabled={activeIsPending || historyClearing || !draft.trim()}>
-                {activeIsPending ? "Planning..." : "Send to FastAPI"}
+                <button className="submit-button" type="submit" disabled={activeIsPending || !draft.trim()}>
+                {activeIsPending ? (pendingMode === "planning" ? "Planning..." : "Checking info...") : "Send to FastAPI"}
                 </button>
               </div>
             </div>

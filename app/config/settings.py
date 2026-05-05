@@ -16,7 +16,9 @@ class Settings(BaseSettings):
     rag_chunk_size_words: int = 120
     rag_chunk_overlap_words: int = 24
     rag_context_chunks: int = 6
-    embedding_provider: str = "sentence_transformers"
+    # Default to lexical-only retrieval to keep API responsive in lightweight
+    # docker environments where torch/sentence-transformers may be unavailable.
+    embedding_provider: str = "lexical"
     embedding_model: str = "intfloat/multilingual-e5-small"
     embedding_batch_size: int = 32
     places_resolver_enabled: bool = False
