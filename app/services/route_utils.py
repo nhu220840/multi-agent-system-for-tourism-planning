@@ -7,6 +7,7 @@ from math import asin, cos, radians, sin, sqrt
 from typing import Any
 from urllib.parse import quote
 
+from app.config.settings import get_settings
 from app.services.place_metadata import (
     city_key_from_text,
     extract_admin_area_keys,
@@ -137,6 +138,10 @@ class ResolvedMapLocation:
     source: str
 
 
+def _nominatim_fallback_enabled() -> bool:
+    return bool(get_settings().places_resolver_enabled)
+
+
 def resolve_location_for_map(
     place: dict[str, Any] | None,
     *,
@@ -197,6 +202,14 @@ def resolve_location_for_map(
             or place.get("google_formatted_address")
             or ""
         ).strip()
+        if not _nominatim_fallback_enabled():
+            return ResolvedMapLocation(
+                lat=float(lat),
+                lon=float(lon),
+                label=_display_label(place=place, fallback_address=db_address),
+                address=db_address or _best_query_label(place),
+                source="db_coordinates",
+            )
         anchor = (float(lat), float(lon))
         hits = _trackasia_reverse_hits_cached(anchor[0], anchor[1])
         snapped = _snap_point_from_hits(hits, place, anchor)
@@ -620,6 +633,8 @@ def _nominatim_map_resolve(
     rank by city/name/category signal so named hotels without DB coordinates do not
     collapse to a district centroid.
     """
+    if not _nominatim_fallback_enabled():
+        return None
     db_tokens = _distinctive_name_tokens(str(place.get("name") or ""))
     if not db_tokens:
         return None

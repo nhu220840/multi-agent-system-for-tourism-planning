@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import socket
 from threading import Lock
 from time import monotonic
 from typing import Any
+from urllib.parse import urlparse
 
 from app.config.settings import get_settings
 from app.services.place_repository import list_place_chunks, list_places
@@ -96,6 +98,31 @@ def _mark_elasticsearch_available() -> None:
         _ES_UNAVAILABLE_UNTIL = 0.0
 
 
+def _elasticsearch_socket_reachable() -> bool:
+    settings = get_settings()
+    url = str(settings.elasticsearch_url or "").strip()
+    if not url:
+        return False
+
+    parsed = urlparse(url)
+    host = parsed.hostname
+    if not host:
+        return False
+
+    if parsed.port is not None:
+        port = int(parsed.port)
+    elif parsed.scheme == "https":
+        port = 443
+    else:
+        port = 9200
+
+    try:
+        with socket.create_connection((host, port), timeout=0.35):
+            return True
+    except OSError:
+        return False
+
+
 def sync_travel_indices(*, recreate: bool = True) -> dict[str, int]:
     _require_reachable_elasticsearch()
     places_count = sync_places_index(recreate=recreate)
@@ -175,6 +202,9 @@ def search_places_index(
     top_k: int,
 ) -> list[dict[str, Any]]:
     if _elasticsearch_temporarily_unavailable():
+        return []
+    if not _elasticsearch_socket_reachable():
+        _mark_elasticsearch_unavailable()
         return []
 
     client = get_elasticsearch_client()

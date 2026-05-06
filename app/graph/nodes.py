@@ -179,13 +179,17 @@ def planning_node(state: TravelGraphState) -> dict[str, Any]:
         local_candidates_considered=local_candidates_considered,
     )
     timings["planning_sources_ms"] = round((perf_counter() - step_started) * 1000, 1)
-    step_started = perf_counter()
-    answer = grounded_answer_tool(
-        query=rag_query,
-        context=context,
-        verified_places=source_artifacts.verified_places,
-    )
-    timings["planning_answer_ms"] = round((perf_counter() - step_started) * 1000, 1)
+    answer = ""
+    if _should_generate_plan(state):
+        timings["planning_answer_ms"] = 0.0
+    else:
+        step_started = perf_counter()
+        answer = grounded_answer_tool(
+            query=rag_query,
+            context=context,
+            verified_places=source_artifacts.verified_places,
+        )
+        timings["planning_answer_ms"] = round((perf_counter() - step_started) * 1000, 1)
     timings["planning_total_ms"] = round((perf_counter() - total_started) * 1000, 1)
 
     return {

@@ -24,7 +24,8 @@ class Settings(BaseSettings):
     places_resolver_enabled: bool = False
     places_resolver_override_coordinates: bool = False
     places_resolver_base_url: str = "https://nominatim.openstreetmap.org"
-    places_resolver_request_timeout_s: int = 10
+    places_resolver_request_timeout_s: int = 3
+    places_resolver_failure_cooldown_s: int = 30
     places_resolver_country_codes: str = "vn"
     places_resolver_user_agent: str = "multi-agent-travel/0.1 (free-places-resolver)"
     google_maps_api_key: str = ""
@@ -47,7 +48,8 @@ class Settings(BaseSettings):
     trackasia_geocode_enabled: bool = True
     trackasia_routing_enabled: bool = True
     trackasia_directions_base_url: str = "https://maps.track-asia.com/route/v2/directions"
-    trackasia_request_timeout_s: int = 8
+    trackasia_request_timeout_s: int = 5
+    trackasia_failure_cooldown_s: int = 30
     trackasia_new_admin: bool = True
     trackasia_cache_ttl_s: int = 900
     trackasia_rate_limit_window_s: int = 60

@@ -21,6 +21,8 @@ _CACHE_LOCK = Lock()
 _RATE_LIMIT_LOCK = Lock()
 _RESPONSE_CACHE: dict[tuple[str, str], tuple[float, Any]] = {}
 _REQUEST_TIMESTAMPS: deque[float] = deque()
+_TRACKASIA_STATE_LOCK = Lock()
+_TRACKASIA_UNAVAILABLE_UNTIL = 0.0
 _ROUTE_MODE_ALIASES = {
     "car": "car",
     "driving": "car",
@@ -290,6 +292,8 @@ def estimate_route(
 
 def _load_json(*, url: str, timeout_s: int, scope: str) -> dict | list | None:
     settings = get_settings()
+    if _trackasia_temporarily_unavailable():
+        return None
     cached = _get_cached_json(
         scope=scope,
         url=url,
@@ -310,6 +314,7 @@ def _load_json(*, url: str, timeout_s: int, scope: str) -> dict | list | None:
     try:
         with urllib.request.urlopen(request, timeout=timeout_s) as response:
             payload = json.loads(response.read().decode("utf-8"))
+            _mark_trackasia_available()
             _store_cached_json(
                 scope=scope,
                 url=url,
@@ -318,6 +323,7 @@ def _load_json(*, url: str, timeout_s: int, scope: str) -> dict | list | None:
             )
             return payload
     except Exception:
+        _mark_trackasia_unavailable(settings=settings)
         return None
 
 
@@ -364,6 +370,26 @@ def _allow_trackasia_request(*, settings: Any) -> bool:
             return False
         _REQUEST_TIMESTAMPS.append(now)
     return True
+
+
+def _trackasia_temporarily_unavailable() -> bool:
+    with _TRACKASIA_STATE_LOCK:
+        return _TRACKASIA_UNAVAILABLE_UNTIL > monotonic()
+
+
+def _mark_trackasia_unavailable(*, settings: Any) -> None:
+    cooldown_s = max(0, int(getattr(settings, "trackasia_failure_cooldown_s", 0) or 0))
+    if cooldown_s <= 0:
+        return
+    with _TRACKASIA_STATE_LOCK:
+        global _TRACKASIA_UNAVAILABLE_UNTIL
+        _TRACKASIA_UNAVAILABLE_UNTIL = monotonic() + cooldown_s
+
+
+def _mark_trackasia_available() -> None:
+    with _TRACKASIA_STATE_LOCK:
+        global _TRACKASIA_UNAVAILABLE_UNTIL
+        _TRACKASIA_UNAVAILABLE_UNTIL = 0.0
 
 
 def _format_directions_point(point: GeoPoint) -> str:
