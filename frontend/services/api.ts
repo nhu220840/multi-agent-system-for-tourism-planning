@@ -88,6 +88,28 @@ async function fetchWithTimeout(
   }
 }
 
+async function ensureBackendHealthy(): Promise<void> {
+  let response: Response;
+  try {
+    response = await fetchWithTimeout(
+      `${API_BASE.replace(/\/api$/, "")}/health`,
+      {
+        method: "GET",
+        credentials: "include",
+      },
+      3000,
+    );
+  } catch (error) {
+    if (error instanceof DOMException && error.name === "AbortError") {
+      throw new Error("Backend chưa phản hồi health check (3s). Hãy kiểm tra API service.");
+    }
+    throw new Error("Không kết nối được backend. Hãy kiểm tra docker/api service.");
+  }
+  if (!response.ok) {
+    throw new Error(`Backend health check failed: ${response.status}`);
+  }
+}
+
 export async function initSession(): Promise<SessionInfo> {
   const response = await fetch(`${API_BASE}/session/init`, {
     method: "POST",
@@ -136,6 +158,7 @@ export async function deleteAllConversations(): Promise<{ deleted_conversations:
 }
 
 export async function sendChat(message: string, conversationId?: string): Promise<ChatResponse> {
+  await ensureBackendHealthy();
   await initSession();
 
   let response: Response;
