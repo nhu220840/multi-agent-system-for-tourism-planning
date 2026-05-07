@@ -1587,52 +1587,37 @@ export function ChatShell() {
 
   return (
     <main className="shell">
-      <section className="hero">
-        <div className="hero-copy">
-          <span className="eyebrow">Next.js + FastAPI</span>
-          <h1>Travel planning UI on top of your FastAPI orchestration layer.</h1>
-          <p>
-            The frontend owns the experience. FastAPI keeps the planner, session cookie, and conversations.
-          </p>
-        </div>
-
-        <div className="hero-card">
-          <div className="hero-card-label">Current principal</div>
-          <div className="hero-card-value">{principal ? principal.type : "booting"}</div>
-          <div className="hero-card-meta">{principal ? principal.id.slice(0, 12) : "waiting for session"}</div>
-          <div className="status-pill">{status}</div>
-        </div>
-      </section>
-
-        <section className="workspace">
+      <section className="workspace">
         <aside className="sidebar">
           <div className="sidebar-header">
-            <h2>Conversations</h2>
+            <h2>Chats</h2>
             <span>{conversationItems.length}</span>
           </div>
 
-          <button
-            className="ghost-button"
-            type="button"
-            disabled={conversationMutationPending}
-            onClick={() => {
-              const key = createDraftConversation();
-              setActiveConversationKey(key);
-              setStatus("Fresh conversation");
-              setError(null);
-            }}
-          >
-            Start new chat
-          </button>
+          <div className="sidebar-actions">
+            <button
+              className="ghost-button"
+              type="button"
+              disabled={conversationMutationPending}
+              onClick={() => {
+                const key = createDraftConversation();
+                setActiveConversationKey(key);
+                setStatus("Fresh conversation");
+                setError(null);
+              }}
+            >
+              New chat
+            </button>
 
-          <button
-            className="ghost-button ghost-button-danger"
-            type="button"
-            disabled={conversationMutationPending || conversationItems.length === 0}
-            onClick={handleDeleteAllConversations}
-          >
-            Clear all history
-          </button>
+            <button
+              className="ghost-button ghost-button-danger"
+              type="button"
+              disabled={conversationMutationPending || conversationItems.length === 0}
+              onClick={handleDeleteAllConversations}
+            >
+              Clear all
+            </button>
+          </div>
 
           <div className="conversation-list">
             {conversationItems.length === 0 ? (
@@ -1672,10 +1657,13 @@ export function ChatShell() {
 
         <section className="chat-panel">
           <div className="chat-header">
-            <div>
-              <h2>Planner Console</h2>
-              <p>Ask for an itinerary, then reuse the same conversation through the FastAPI session.</p>
+            <div className="chat-header-copy">
+              <h1>Travel Planner</h1>
+              <span className="chat-header-meta">
+                {principal ? `${principal.type} · ${principal.id.slice(0, 8)}` : "Starting session"}
+              </span>
             </div>
+            <span className="chat-status">{status}</span>
           </div>
 
           <div className="chat-body">
@@ -1687,7 +1675,7 @@ export function ChatShell() {
                       <span className="message-role">Assistant</span>
                       {renderMessageContent(STARTER_ASSISTANT_MESSAGE)}
                     </article>
-                    <p>Bạn có thể trả lời ngắn như: "3 ngày", "2 ngày 1 đêm" hoặc "cuối tuần này".</p>
+                    <p>Bạn có thể trả lời ngắn như: &quot;3 ngày&quot;, &quot;2 ngày 1 đêm&quot; hoặc &quot;cuối tuần này&quot;.</p>
                   </div>
                 ) : (
                   messages.map((message) => (
@@ -1802,13 +1790,11 @@ export function ChatShell() {
           </div>
 
           <form className="composer" onSubmit={handleSubmit}>
-            <label className="composer-label" htmlFor="message">
-              Message
-            </label>
             <textarea
               id="message"
               className="composer-input"
               rows={4}
+              aria-label="Message"
               placeholder="Describe the trip you want the planner to build..."
               value={draft}
               onChange={(event) => setDraft(event.target.value)}
@@ -1822,7 +1808,7 @@ export function ChatShell() {
               )}
               <div className="composer-action-buttons">
                 <button className="submit-button" type="submit" disabled={activeIsPending || !draft.trim()}>
-                {activeIsPending ? (pendingMode === "planning" ? "Planning..." : "Checking info...") : "Send to FastAPI"}
+                  {activeIsPending ? (pendingMode === "planning" ? "Planning..." : "Checking info...") : "Send"}
                 </button>
               </div>
             </div>

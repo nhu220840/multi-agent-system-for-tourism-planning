@@ -353,31 +353,37 @@ def resolve_segment_locations(
     a: dict[str, Any] | None,
     b: dict[str, Any] | None,
 ) -> tuple[ResolvedMapLocation | None, ResolvedMapLocation | None]:
-    a_loc = resolve_location_for_map(a, allow_approximate_fallback=False)
-    b_loc = resolve_location_for_map(b, allow_approximate_fallback=False)
+    a_loc = _best_location_for_map_link(a)
+    b_loc = _best_location_for_map_link(b)
     if not a_loc or not b_loc:
         return a_loc, b_loc
 
     if not _same_place(a, b) and _same_coordinates(a_loc, b_loc):
-        a_alt = resolve_location_for_map(a, prefer_search=True, allow_approximate_fallback=False)
+        a_alt = _best_location_for_map_link(a, prefer_search=True)
         if a_alt and not _same_coordinates(a_alt, b_loc):
             a_loc = a_alt
-        b_alt = resolve_location_for_map(b, prefer_search=True, allow_approximate_fallback=False)
+        b_alt = _best_location_for_map_link(b, prefer_search=True)
         if b_alt and not _same_coordinates(a_loc, b_alt):
             b_loc = b_alt
 
     if not _location_matches_place_keywords(a, a_loc):
-        a_alt = resolve_location_for_map(a, prefer_search=True, allow_approximate_fallback=False)
-        a_loc = a_alt if a_alt and _location_matches_place_keywords(a, a_alt) else None
+        a_alt = _best_location_for_map_link(a, prefer_search=True)
+        if a_alt and (_location_matches_place_keywords(a, a_alt) or _usable_specific_map_fallback(a_alt)):
+            a_loc = a_alt
+        elif not _usable_specific_map_fallback(a_loc):
+            a_loc = None
     if not _location_matches_place_keywords(b, b_loc):
-        b_alt = resolve_location_for_map(b, prefer_search=True, allow_approximate_fallback=False)
-        b_loc = b_alt if b_alt and _location_matches_place_keywords(b, b_alt) else None
+        b_alt = _best_location_for_map_link(b, prefer_search=True)
+        if b_alt and (_location_matches_place_keywords(b, b_alt) or _usable_specific_map_fallback(b_alt)):
+            b_loc = b_alt
+        elif not _usable_specific_map_fallback(b_loc):
+            b_loc = None
     return a_loc, b_loc
 
 
 def place_map_url(place: dict[str, Any] | None) -> str:
     """Deep-link straight to TrackAsia's hosted map viewer focused on a single place."""
-    resolved = resolve_location_for_map(place, allow_approximate_fallback=False)
+    resolved = _best_location_for_map_link(place)
     if not resolved:
         return ""
     return _trackasia_place_url(resolved)
@@ -396,7 +402,7 @@ def osm_directions_url(
     del engine
     resolved_stops: list[ResolvedMapLocation] = []
     for stop in stops:
-        resolved = resolve_location_for_map(stop, allow_approximate_fallback=False)
+        resolved = _best_location_for_map_link(stop)
         if not resolved:
             continue
         if resolved_stops and _same_coordinates(resolved_stops[-1], resolved):
@@ -418,6 +424,29 @@ def segment_map_url(
     if not a_loc or not b_loc or _same_coordinates(a_loc, b_loc):
         return ""
     return _trackasia_route_url(a_loc, b_loc)
+
+
+def _best_location_for_map_link(
+    place: dict[str, Any] | None,
+    *,
+    prefer_search: bool = False,
+) -> ResolvedMapLocation | None:
+    exact = resolve_location_for_map(
+        place,
+        prefer_search=prefer_search,
+        allow_approximate_fallback=False,
+    )
+    if exact is not None:
+        return exact
+
+    fallback = resolve_location_for_map(
+        place,
+        prefer_search=True,
+        allow_approximate_fallback=True,
+    )
+    if _usable_specific_map_fallback(fallback):
+        return fallback
+    return None
 
 
 def haversine_km(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
@@ -1252,6 +1281,27 @@ def _trackasia_address_top_geocode(
         address=candidate_address or db_address,
         source=str(best.get("source") or "trackasia_textsearch") + ":address_top",
     )
+
+
+def _usable_specific_map_fallback(loc: ResolvedMapLocation | None) -> bool:
+    if not loc:
+        return False
+    if _is_generic_map_location(loc):
+        return False
+    source = str(loc.source or "").strip().lower()
+    if source.startswith("area_centroid:") or source.startswith("city_centroid:"):
+        return False
+    if source == "db_coordinates":
+        return _has_precise_address(fold_text(loc.address))
+    if ":nearby_anchor" in source:
+        return _has_precise_address(fold_text(loc.address)) or bool(_distinctive_name_tokens(loc.label))
+    if ":address_top" in source:
+        return True
+    if source == "nominatim:keyword_match":
+        return True
+    if source.startswith("trackasia_textsearch") or source.startswith("trackasia_reverse_geocode"):
+        return _has_precise_address(fold_text(loc.address)) or bool(_distinctive_name_tokens(loc.label))
+    return _has_precise_address(fold_text(loc.address))
 
 
 def _city_key_compatible(*, expected: str, actual: str) -> bool:

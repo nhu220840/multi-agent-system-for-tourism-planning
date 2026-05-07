@@ -74,6 +74,58 @@ class RouteUtilsResolutionTests(unittest.TestCase):
 
         self.assertEqual("", url)
 
+    def test_place_map_url_accepts_specific_nearby_fallback(self) -> None:
+        place = {
+            "name": "Công viên suối khoáng nóng núi Thần tài",
+            "address": "Thôn Phú Túc, Huyện Hòa Vang, Thành phố Đà Nẵng",
+            "city": "Đà Nẵng",
+            "district": "Hòa Vang",
+        }
+        nearby = route_utils.ResolvedMapLocation(
+            lat=15.999001,
+            lon=107.995001,
+            label="Khu tắm khoáng Núi Thần Tài",
+            address="QL14G, Hòa Phú, Hòa Vang, Thành phố Đà Nẵng, Việt Nam",
+            source="trackasia_reverse_geocode:nearby_anchor",
+        )
+
+        with patch.object(route_utils, "resolve_location_for_map", side_effect=[None, nearby]):
+            url = route_utils.place_map_url(place)
+
+        self.assertIn("latlon:15.999001:107.995001", url)
+        self.assertIn("Khu%20t%E1%BA%AFm%20kho%C3%A1ng%20N%C3%BAi%20Th%E1%BA%A7n%20T%C3%A0i", url)
+
+    def test_segment_map_url_keeps_specific_address_fallback_even_without_name_overlap(self) -> None:
+        origin = {
+            "name": "Công viên Châu Á",
+            "address": "01 Phan Đăng Lưu, Hòa Cường, Quận Hải Châu, Thành phố Đà Nẵng",
+        }
+        destination = {
+            "name": "Citron Restaurant – Nhà hàng Đà Nẵng view đẹp",
+            "address": "Bãi Bắc, Sơn Trà Peninsula, Thành phố Đà Nẵng",
+        }
+        origin_loc = route_utils.ResolvedMapLocation(
+            lat=16.041234,
+            lon=108.224567,
+            label="Helio Center",
+            address="Helio Center, 01 Đường 2 Tháng 9, Hòa Cường, Quận Hải Châu, Thành phố Đà Nẵng",
+            source="trackasia_textsearch:address_top",
+        )
+        destination_loc = route_utils.ResolvedMapLocation(
+            lat=16.118765,
+            lon=108.242222,
+            label="Citron Restaurant",
+            address="Bãi Bắc, Sơn Trà Peninsula, Thành phố Đà Nẵng",
+            source="trackasia_textsearch:name_match",
+        )
+
+        with patch.object(route_utils, "_best_location_for_map_link", side_effect=[origin_loc, destination_loc]):
+            with patch.object(route_utils, "_trackasia_route_url", return_value="safe-route-url") as route_url_mock:
+                url = route_utils.segment_map_url(origin, destination)
+
+        self.assertEqual("safe-route-url", url)
+        route_url_mock.assert_called_once()
+
 
 if __name__ == "__main__":
     unittest.main()
