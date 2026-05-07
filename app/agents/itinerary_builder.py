@@ -2550,6 +2550,8 @@ def _build_route_leg(
     if not from_name or not to_name or from_name == to_name:
         return None
 
+    raw_a_pt = _raw_point(origin)
+    raw_b_pt = _raw_point(destination)
     payload: dict[str, object] = {
         "day": day,
         "day_label": f"Ngày {day}",
@@ -2562,7 +2564,10 @@ def _build_route_leg(
         "segment_map_url": _segment_map_url(origin, destination),
     }
 
-    a_pt, b_pt = _resolve_segment_points(origin, destination)
+    # Prefer direct DB coordinates first (fast path) so route planning stays responsive.
+    a_pt, b_pt = raw_a_pt, raw_b_pt
+    if not a_pt or not b_pt:
+        a_pt, b_pt = _resolve_segment_points(origin, destination)
     if not a_pt or not b_pt:
         return payload
 
@@ -2645,6 +2650,16 @@ def _fastest_route_by_map(origin: GeoPoint, destination: GeoPoint) -> dict | Non
 
 def _haversine_km(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
     return _shared_haversine_km(lat1, lon1, lat2, lon2)
+
+
+def _raw_point(place: dict | None) -> tuple[float, float] | None:
+    if not place:
+        return None
+    lat = place.get("lat")
+    lon = place.get("lon")
+    if not isinstance(lat, (int, float)) or not isinstance(lon, (int, float)):
+        return None
+    return float(lat), float(lon)
 
 
 def _is_quality_attraction_name(name: str) -> bool:

@@ -519,7 +519,10 @@ def _build_route_plan(verified_places: List[dict]) -> List[dict]:
     for i in range(len(points) - 1):
         a = points[i]
         b = points[i + 1]
-        a_point, b_point = resolve_segment_points(a, b)
+        a_point = _raw_point(a)
+        b_point = _raw_point(b)
+        if not a_point or not b_point:
+            a_point, b_point = resolve_segment_points(a, b)
         if not a_point or not b_point:
             continue
         o = GeoPoint(lat=float(a_point[0]), lon=float(a_point[1]))
@@ -597,6 +600,16 @@ def _haversine_m(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
     dl = radians(lon2 - lon1)
     a = sin(dp / 2) ** 2 + cos(p1) * cos(p2) * sin(dl / 2) ** 2
     return 2 * r * asin(sqrt(a))
+
+
+def _raw_point(place: dict[str, Any] | None) -> tuple[float, float] | None:
+    if not place:
+        return None
+    lat = place.get("lat")
+    lon = place.get("lon")
+    if not isinstance(lat, (int, float)) or not isinstance(lon, (int, float)):
+        return None
+    return float(lat), float(lon)
 
 
 def _map_url(

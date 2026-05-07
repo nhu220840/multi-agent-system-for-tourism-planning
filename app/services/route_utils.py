@@ -141,6 +141,7 @@ def resolve_location_for_map(
     place: dict[str, Any] | None,
     *,
     prefer_search: bool = False,
+    allow_approximate_fallback: bool = True,
 ) -> ResolvedMapLocation | None:
     """Resolve a place to coordinates + label ready for the TrackAsia map view.
 
@@ -172,8 +173,14 @@ def resolve_location_for_map(
     """
     if not place:
         return None
-    city_key = place_city_key(place)
+    city_key = _expected_city_key_for_map(place)
     queries = _build_geocode_queries(place)
+    db_address = str(
+        place.get("address")
+        or place.get("map_formatted_address")
+        or place.get("google_formatted_address")
+        or ""
+    ).strip()
 
     if prefer_search:
         name_match = _trackasia_name_aware_geocode(
@@ -187,16 +194,17 @@ def resolve_location_for_map(
             resolved = _trackasia_geocode_cached(query=query, expected_city_key=city_key)
             if resolved and _resolved_location_is_safe_for_place(place, resolved):
                 return resolved
+        address_top = _trackasia_address_top_geocode(
+            place=place,
+            expected_city_key=city_key,
+            fallback_address=db_address,
+        )
+        if address_top is not None:
+            return address_top
 
     lat = place.get("lat")
     lon = place.get("lon")
     if isinstance(lat, (int, float)) and isinstance(lon, (int, float)):
-        db_address = str(
-            place.get("address")
-            or place.get("map_formatted_address")
-            or place.get("google_formatted_address")
-            or ""
-        ).strip()
         anchor = (float(lat), float(lon))
         hits = _trackasia_reverse_hits_cached(anchor[0], anchor[1])
         snapped = _snap_point_from_hits(hits, place, anchor)
@@ -222,6 +230,15 @@ def resolve_location_for_map(
         if name_match is not None:
             return name_match
 
+        address_top = _trackasia_address_top_geocode(
+            place=place,
+            expected_city_key=city_key,
+            anchor=anchor,
+            fallback_address=db_address,
+        )
+        if address_top is not None:
+            return address_top
+
         nearby = _nearby_clear_anchor_for_place(
             place,
             lat=float(lat),
@@ -231,14 +248,15 @@ def resolve_location_for_map(
         if nearby:
             return nearby
 
-        nearby_loose = _nearby_clear_anchor_for_place(
-            place,
-            lat=float(lat),
-            lon=float(lon),
-            require_name_match=False,
-        )
-        if nearby_loose:
-            return nearby_loose
+        if allow_approximate_fallback:
+            nearby_loose = _nearby_clear_anchor_for_place(
+                place,
+                lat=float(lat),
+                lon=float(lon),
+                require_name_match=False,
+            )
+            if nearby_loose:
+                return nearby_loose
 
         nom = _nominatim_map_resolve(place, anchor)
         if nom is not None:
@@ -270,9 +288,20 @@ def resolve_location_for_map(
         ):
             return resolved
 
+    address_top = _trackasia_address_top_geocode(
+        place=place,
+        expected_city_key=city_key,
+        fallback_address=db_address,
+    )
+    if address_top is not None:
+        return address_top
+
     nom = _nominatim_map_resolve(place, anchor=None)
     if nom is not None:
         return nom
+
+    if not allow_approximate_fallback:
+        return None
 
     for area in extract_admin_area_keys(place):
         if area in _AREA_CENTROIDS:
@@ -324,31 +353,31 @@ def resolve_segment_locations(
     a: dict[str, Any] | None,
     b: dict[str, Any] | None,
 ) -> tuple[ResolvedMapLocation | None, ResolvedMapLocation | None]:
-    a_loc = resolve_location_for_map(a)
-    b_loc = resolve_location_for_map(b)
+    a_loc = resolve_location_for_map(a, allow_approximate_fallback=False)
+    b_loc = resolve_location_for_map(b, allow_approximate_fallback=False)
     if not a_loc or not b_loc:
         return a_loc, b_loc
 
     if not _same_place(a, b) and _same_coordinates(a_loc, b_loc):
-        a_alt = resolve_location_for_map(a, prefer_search=True)
+        a_alt = resolve_location_for_map(a, prefer_search=True, allow_approximate_fallback=False)
         if a_alt and not _same_coordinates(a_alt, b_loc):
             a_loc = a_alt
-        b_alt = resolve_location_for_map(b, prefer_search=True)
+        b_alt = resolve_location_for_map(b, prefer_search=True, allow_approximate_fallback=False)
         if b_alt and not _same_coordinates(a_loc, b_alt):
             b_loc = b_alt
 
     if not _location_matches_place_keywords(a, a_loc):
-        a_alt = resolve_location_for_map(a, prefer_search=True)
+        a_alt = resolve_location_for_map(a, prefer_search=True, allow_approximate_fallback=False)
         a_loc = a_alt if a_alt and _location_matches_place_keywords(a, a_alt) else None
     if not _location_matches_place_keywords(b, b_loc):
-        b_alt = resolve_location_for_map(b, prefer_search=True)
+        b_alt = resolve_location_for_map(b, prefer_search=True, allow_approximate_fallback=False)
         b_loc = b_alt if b_alt and _location_matches_place_keywords(b, b_alt) else None
     return a_loc, b_loc
 
 
 def place_map_url(place: dict[str, Any] | None) -> str:
     """Deep-link straight to TrackAsia's hosted map viewer focused on a single place."""
-    resolved = resolve_location_for_map(place)
+    resolved = resolve_location_for_map(place, allow_approximate_fallback=False)
     if not resolved:
         return ""
     return _trackasia_place_url(resolved)
@@ -367,7 +396,7 @@ def osm_directions_url(
     del engine
     resolved_stops: list[ResolvedMapLocation] = []
     for stop in stops:
-        resolved = resolve_location_for_map(stop)
+        resolved = resolve_location_for_map(stop, allow_approximate_fallback=False)
         if not resolved:
             continue
         if resolved_stops and _same_coordinates(resolved_stops[-1], resolved):
@@ -412,30 +441,60 @@ def _build_geocode_queries(place: dict[str, Any]) -> list[str]:
         )
     )
     district = str(place.get("district") or "").strip()
-    city = str(place.get("city") or "").strip()
+    city_labels = _search_city_labels(place)
 
     name_variants = _searchable_name_variants(name)
     address_variants = _searchable_address_variants(address)
 
     candidates = [
-        ", ".join(part for part in [name, address, district, city] if part),
-        ", ".join(part for part in [name, address, city] if part),
-        ", ".join(part for part in [name, district, city] if part),
-        ", ".join(part for part in [address, district, city] if part),
-        ", ".join(part for part in [name, city] if part),
-        ", ".join(part for part in [address, city] if part),
+        ", ".join(part for part in [name, address] if part),
+        address,
+        name,
+        ", ".join(part for part in [name, address, district] if part),
     ]
+    for city in city_labels:
+        candidates.extend(
+            [
+                ", ".join(part for part in [name, address, district, city] if part),
+                ", ".join(part for part in [name, address, city] if part),
+                ", ".join(part for part in [name, district, city] if part),
+                ", ".join(part for part in [address, district, city] if part),
+                ", ".join(part for part in [name, city] if part),
+                ", ".join(part for part in [address, city] if part),
+            ]
+        )
+    if not city_labels:
+        candidates.extend(
+            [
+                ", ".join(part for part in [name, address, district] if part),
+                ", ".join(part for part in [name, district] if part),
+                ", ".join(part for part in [address, district] if part),
+            ]
+        )
     for name_variant in name_variants:
         candidates.extend(
             [
-                ", ".join(part for part in [name_variant, address, city] if part),
-                ", ".join(part for part in [name_variant, city] if part),
+                name_variant,
+                ", ".join(part for part in [name_variant, address] if part),
             ]
         )
+        if not city_labels:
+            candidates.append(", ".join(part for part in [name_variant, district] if part))
+        for city in city_labels:
+            candidates.extend(
+                [
+                    ", ".join(part for part in [name_variant, address, city] if part),
+                    ", ".join(part for part in [name_variant, city] if part),
+                ]
+            )
         for address_variant in address_variants[:2]:
-            candidates.append(", ".join(part for part in [name_variant, address_variant, city] if part))
+            candidates.append(", ".join(part for part in [name_variant, address_variant] if part))
+            for city in city_labels:
+                candidates.append(", ".join(part for part in [name_variant, address_variant, city] if part))
     for address_variant in address_variants:
-        candidates.append(", ".join(part for part in [address_variant, city] if part))
+        candidates.append(address_variant)
+        for city in city_labels:
+            candidates.append(", ".join(part for part in [address_variant, city] if part))
 
     deduped: list[str] = []
     seen: set[str] = set()
@@ -458,6 +517,62 @@ def _best_query_label(place: dict[str, Any] | None) -> str:
         if candidate:
             return candidate
     return str(place.get("name") or "").strip()
+
+
+def _search_city_labels(place: dict[str, Any]) -> list[str]:
+    labels: list[str] = []
+    address = normalize_address_text(
+        str(
+            place.get("address")
+            or place.get("map_formatted_address")
+            or place.get("google_formatted_address")
+            or ""
+        )
+    )
+    raw_city = str(place.get("city") or "").strip()
+    district = str(place.get("district") or "").strip()
+
+    candidates = [raw_city]
+    if district:
+        candidates.append(district)
+    if address:
+        parts = [part.strip() for part in address.split(",") if part.strip()]
+        candidates.extend(parts[1:])
+    expected_key = _expected_city_key_for_map(place)
+    if expected_key == "da_nang":
+        candidates.append("Đà Nẵng")
+    elif expected_key == "hoi_an":
+        candidates.extend(["Hội An", "Quảng Nam"])
+    elif expected_key == "quang_nam":
+        candidates.append("Quảng Nam")
+
+    deduped: list[str] = []
+    seen: set[str] = set()
+    for candidate in candidates:
+        normalized = normalize_address_text(candidate)
+        if not normalized:
+            continue
+        key = fold_text(normalized)
+        if key in seen:
+            continue
+        seen.add(key)
+        deduped.append(normalized)
+    return deduped
+
+
+def _expected_city_key_for_map(place: dict[str, Any]) -> str:
+    address_blob = " ".join(
+        [
+            str(place.get("address") or ""),
+            str(place.get("map_formatted_address") or ""),
+            str(place.get("google_formatted_address") or ""),
+            str(place.get("district") or ""),
+        ]
+    )
+    from_address = city_key_from_text(address_blob)
+    if from_address:
+        return from_address
+    return place_city_key(place)
 
 
 def _trackasia_place_url(loc: ResolvedMapLocation) -> str:
@@ -629,7 +744,7 @@ def _nominatim_map_resolve(
         or place.get("google_formatted_address")
         or ""
     ).strip()
-    city_key = place_city_key(place)
+    city_key = _expected_city_key_for_map(place)
     seen: set[tuple[float, float]] = set()
     scored: list[tuple[int, int, int, float, dict[str, Any]]] = []
     for query in _build_geocode_queries(place)[:4]:
@@ -657,12 +772,12 @@ def _nominatim_map_resolve(
                 continue
             blob = fold_text(f"{label} {address}")
             blob_city = city_key_from_text(blob)
-            if city_key and blob_city and blob_city != city_key:
+            if not _city_key_compatible(expected=city_key, actual=blob_city):
                 continue
             name_score = _name_overlap_score(db_tokens, _distinctive_name_tokens(label))
             if name_score == 0:
                 continue
-            city_score = 1 if (not city_key or blob_city == city_key or not blob_city) else 0
+            city_score = 1 if _city_key_compatible(expected=city_key, actual=blob_city) else 0
             category_score = _nominatim_category_score(place, item)
             if anchor is not None:
                 dist_km = haversine_km(anchor[0], anchor[1], float(lat), float(lon))
@@ -801,7 +916,7 @@ def _nearby_clear_anchor_for_place(
     place_name = str(place.get("name") or "").strip()
     enforce_name_match = require_name_match or is_user_facing_place_name(place_name)
     db_tokens = _distinctive_name_tokens(str(place.get("name") or ""))
-    expected_city_key = place_city_key(place)
+    expected_city_key = _expected_city_key_for_map(place)
     candidates: list[tuple[int, int, float, dict[str, Any]]] = []
     for item in hits:
         item_lat = item.get("lat")
@@ -820,7 +935,7 @@ def _nearby_clear_anchor_for_place(
         if _is_generic_map_location(loc):
             continue
         blob = fold_text(f"{label} {address}")
-        city_score = 1 if expected_city_key and city_key_from_text(blob) == expected_city_key else 0
+        city_score = 1 if _city_key_compatible(expected=expected_city_key, actual=city_key_from_text(blob)) else 0
         name_score = _name_overlap_score(db_tokens, _distinctive_name_tokens(label))
         if enforce_name_match and db_tokens and name_score == 0:
             continue
@@ -946,7 +1061,7 @@ def _trackasia_name_aware_geocode(
         city_score = 0
         if expected_city_key:
             blob = fold_text(f"{candidate_name} {candidate_address}")
-            city_score = 1 if city_key_from_text(blob) == expected_city_key else 0
+            city_score = 1 if _city_key_compatible(expected=expected_city_key, actual=city_key_from_text(blob)) else 0
         if anchor is not None:
             distance_km = haversine_km(
                 anchor[0], anchor[1], float(item["lat"]), float(item["lon"])
@@ -994,6 +1109,201 @@ def _trackasia_name_aware_geocode(
         address=resolved_address,
         source=source,
     )
+
+
+def _build_address_only_queries(place: dict[str, Any]) -> list[str]:
+    address = normalize_address_text(
+        str(
+            place.get("address")
+            or place.get("map_formatted_address")
+            or place.get("google_formatted_address")
+            or ""
+        )
+    )
+    if not address:
+        return []
+    candidates = [address]
+    parts = [part.strip() for part in address.split(",") if part.strip()]
+    street_part = parts[0] if parts else ""
+    if street_part:
+        candidates.append(street_part)
+    for city in _search_city_labels(place):
+        if city and fold_text(city) not in fold_text(address):
+            candidates.append(", ".join(part for part in [address, city] if part))
+            if street_part:
+                candidates.append(", ".join(part for part in [street_part, city] if part))
+
+    deduped: list[str] = []
+    seen: set[str] = set()
+    for candidate in candidates:
+        normalized = normalize_address_text(candidate)
+        if not normalized:
+            continue
+        key = fold_text(normalized)
+        if key in seen:
+            continue
+        seen.add(key)
+        deduped.append(normalized)
+    return deduped
+
+
+def _trackasia_address_top_geocode(
+    *,
+    place: dict[str, Any],
+    expected_city_key: str,
+    anchor: tuple[float, float] | None = None,
+    fallback_address: str = "",
+    top_k_per_query: int = 3,
+) -> ResolvedMapLocation | None:
+    """Fallback that trusts the top *address* hits once name-based matching fails.
+
+    This path is intentionally stricter than a plain reverse-geocode:
+      1. Search by the catalog address itself.
+      2. Keep only specific, non-generic POIs.
+      3. Prefer hits whose displayed name still overlaps with the catalog name.
+      4. If no name overlap exists, allow the top address hit as long as its
+         address still matches the catalog street/house-number closely.
+    """
+    db_name = str(place.get("name") or "").strip()
+    db_tokens = _distinctive_name_tokens(db_name)
+    db_address = normalize_address_text(
+        fallback_address
+        or str(
+            place.get("address")
+            or place.get("map_formatted_address")
+            or place.get("google_formatted_address")
+            or ""
+        )
+    )
+    if not db_address:
+        return None
+
+    candidates: list[tuple[int, int, int, float, int, int, dict[str, Any]]] = []
+    seen: set[tuple[float, float]] = set()
+    queries = _build_address_only_queries(place)
+    for query_index, query in enumerate(queries):
+        raw = _trackasia_textsearch_results_cached(query=query, limit=_TEXTSEARCH_CANDIDATE_LIMIT)
+        for result_index, item in enumerate(raw[: max(1, int(top_k_per_query))]):
+            lat = item.get("lat")
+            lon = item.get("lon")
+            if not isinstance(lat, (int, float)) or not isinstance(lon, (int, float)):
+                continue
+            key = (round(float(lat), 5), round(float(lon), 5))
+            if key in seen:
+                continue
+            candidate_name = str(item.get("name") or "").strip()
+            candidate_address = normalize_address_text(str(item.get("address") or "").strip())
+            candidate = ResolvedMapLocation(
+                lat=float(lat),
+                lon=float(lon),
+                label=candidate_name,
+                address=candidate_address,
+                source=str(item.get("source") or "trackasia_textsearch"),
+            )
+            if _is_generic_map_location(candidate):
+                continue
+            blob_city = city_key_from_text(f"{candidate_name} {candidate_address}")
+            if not _city_key_compatible(expected=expected_city_key, actual=blob_city):
+                continue
+            address_score = _address_match_score(db_address, candidate_address)
+            if address_score <= 0:
+                continue
+            if anchor is not None:
+                distance_km = haversine_km(anchor[0], anchor[1], float(lat), float(lon))
+                if distance_km > _TEXTSEARCH_FALLBACK_RADIUS_KM:
+                    continue
+            else:
+                distance_km = 0.0
+            seen.add(key)
+            name_score = _name_overlap_score(db_tokens, _distinctive_name_tokens(candidate_name))
+            city_score = 1 if _city_key_compatible(expected=expected_city_key, actual=blob_city) else 0
+            precision_score = 1 if _has_precise_address(fold_text(candidate_address)) else 0
+            candidates.append(
+                (
+                    name_score,
+                    address_score,
+                    city_score + precision_score,
+                    -distance_km,
+                    -query_index,
+                    -result_index,
+                    item,
+                )
+            )
+
+    if not candidates:
+        return None
+    candidates.sort(key=lambda row: (row[0], row[1], row[2], row[3], row[4], row[5]), reverse=True)
+    _, _, _, _, _, _, best = candidates[0]
+    candidate_name = str(best.get("name") or "").strip()
+    candidate_address = normalize_address_text(str(best.get("address") or "").strip())
+    name_score = _name_overlap_score(db_tokens, _distinctive_name_tokens(candidate_name))
+    if name_score > 0:
+        label = _display_label(
+            place=place,
+            fallback_name=candidate_name,
+            fallback_address=candidate_address or db_address,
+        )
+    else:
+        label = candidate_name or (candidate_address.split(",")[0].strip() if candidate_address else db_address)
+    return ResolvedMapLocation(
+        lat=float(best["lat"]),
+        lon=float(best["lon"]),
+        label=label,
+        address=candidate_address or db_address,
+        source=str(best.get("source") or "trackasia_textsearch") + ":address_top",
+    )
+
+
+def _city_key_compatible(*, expected: str, actual: str) -> bool:
+    expected_key = str(expected or "").strip().lower()
+    actual_key = str(actual or "").strip().lower()
+    if not expected_key or not actual_key:
+        return True
+    if expected_key == actual_key:
+        return True
+    if expected_key == "quang_nam" and actual_key in {"hoi_an", "quang_nam"}:
+        return True
+    return False
+
+
+def _address_match_score(db_address: str, candidate_address: str) -> int:
+    db_folded = fold_text(normalize_address_text(db_address))
+    candidate_folded = fold_text(normalize_address_text(candidate_address))
+    if not db_folded or not candidate_folded:
+        return 0
+
+    score = 0
+    if db_folded in candidate_folded or candidate_folded in db_folded:
+        score += 2
+
+    db_number = _leading_address_number(db_folded)
+    candidate_number = _leading_address_number(candidate_folded)
+    if db_number and candidate_number and db_number == candidate_number:
+        score += 2
+
+    db_tokens = _street_identity_tokens(db_folded)
+    candidate_tokens = _street_identity_tokens(candidate_folded)
+    if db_tokens and candidate_tokens:
+        overlap = len(db_tokens & candidate_tokens)
+        if overlap > 0:
+            score += overlap
+    return score
+
+
+def _leading_address_number(text: str) -> str:
+    match = re.search(r"\b\d+[a-z]?(?:\s*[-/]\s*\d+[a-z]?)?\b", text)
+    return match.group(0).replace(" ", "") if match else ""
+
+
+def _street_identity_tokens(text: str) -> set[str]:
+    head = normalize_address_text(text).split(",")[0].strip()
+    if not head:
+        return set()
+    return {
+        token
+        for token in re.split(r"[^a-z0-9]+", head)
+        if len(token) >= 3 and token not in _NAME_STOPWORDS and not token.isdigit()
+    }
 
 
 @lru_cache(maxsize=4096)
