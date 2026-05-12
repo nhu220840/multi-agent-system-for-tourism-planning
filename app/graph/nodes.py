@@ -15,7 +15,6 @@ from app.services.planning_tools import (
     build_itinerary_tool,
     build_sources_tool,
     coordinator_tool,
-    grounded_answer_tool,
     prepare_query_tool,
     research_tool,
     retrieve_places_tool,
@@ -179,13 +178,7 @@ def planning_node(state: TravelGraphState) -> dict[str, Any]:
         local_candidates_considered=local_candidates_considered,
     )
     timings["planning_sources_ms"] = round((perf_counter() - step_started) * 1000, 1)
-    step_started = perf_counter()
-    answer = grounded_answer_tool(
-        query=rag_query,
-        context=context,
-        verified_places=source_artifacts.verified_places,
-    )
-    timings["planning_answer_ms"] = round((perf_counter() - step_started) * 1000, 1)
+    timings["planning_answer_ms"] = 0.0
     timings["planning_total_ms"] = round((perf_counter() - total_started) * 1000, 1)
 
     return {
@@ -202,7 +195,7 @@ def planning_node(state: TravelGraphState) -> dict[str, Any]:
         "research": research,
         "plan": plan,
         "stay_plan": stay_plan,
-        "answer": answer,
+        "answer": "",
         "coordinator_plan": coordinator_plan,
         "sources": source_artifacts.sources,
         "verified_places": source_artifacts.verified_places,

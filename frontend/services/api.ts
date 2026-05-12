@@ -62,6 +62,31 @@ export type DebugStep = {
   details: Record<string, unknown>;
 };
 
+export type ChatStageName = "intake" | "planning" | "validator" | "response";
+
+export type ChatStreamConversationEvent = {
+  conversation_id: string | null;
+};
+
+export type ChatStreamStageEvent = {
+  stage: ChatStageName;
+  status: "started" | "completed";
+  trace: string[];
+  conversation_stage?: string | null;
+  missing_fields?: string[];
+  follow_up_questions?: string[];
+  needs_replan?: boolean;
+  retrying?: boolean;
+};
+
+type SendChatStreamHandlers = {
+  onConversation?: (event: ChatStreamConversationEvent) => void;
+  onStage?: (event: ChatStreamStageEvent) => void;
+  onAnswerStart?: (event: ChatStreamConversationEvent) => void;
+  onAnswerDelta?: (delta: string) => void;
+  onComplete?: (response: ChatResponse) => void;
+};
+
 async function parseJson<T>(response: Response, errorPrefix: string): Promise<T> {
   if (!response.ok) {
     throw new Error(`${errorPrefix}: ${response.status}`);
@@ -161,4 +186,140 @@ export async function sendChat(message: string, conversationId?: string): Promis
   }
 
   return parseJson<ChatResponse>(response, "Chat request failed");
+}
+
+function parseSseBlock(block: string): { event: string; data: string } | null {
+  const trimmed = block.trim();
+  if (!trimmed) {
+    return null;
+  }
+
+  let event = "message";
+  const dataLines: string[] = [];
+
+  for (const line of trimmed.split("\n")) {
+    if (line.startsWith("event:")) {
+      event = line.slice(6).trim();
+      continue;
+    }
+    if (line.startsWith("data:")) {
+      dataLines.push(line.slice(5).trimStart());
+    }
+  }
+
+  if (dataLines.length === 0) {
+    return null;
+  }
+
+  return {
+    event,
+    data: dataLines.join("\n"),
+  };
+}
+
+export async function sendChatStream(
+  message: string,
+  conversationId: string | undefined,
+  handlers: SendChatStreamHandlers,
+): Promise<ChatResponse> {
+  await initSession();
+
+  let response: Response;
+  try {
+    response = await fetchWithTimeout(
+      `${API_BASE}/chat/stream`,
+      {
+        method: "POST",
+        credentials: "include",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          message,
+          conversation_id: conversationId,
+        } satisfies ChatRequest),
+      },
+      CHAT_REQUEST_TIMEOUT_MS,
+    );
+  } catch (error) {
+    if (error instanceof DOMException && error.name === "AbortError") {
+      throw new Error(`Chat request timed out after ${Math.round(CHAT_REQUEST_TIMEOUT_MS / 1000)}s`);
+    }
+    throw error;
+  }
+
+  if (!response.ok) {
+    throw new Error(`Chat request failed: ${response.status}`);
+  }
+  if (!response.body) {
+    throw new Error("Streaming response is not available in this browser.");
+  }
+
+  const reader = response.body.getReader();
+  const decoder = new TextDecoder();
+  let buffer = "";
+  let finalResponse: ChatResponse | null = null;
+  let streamError: string | null = null;
+
+  const handleBlock = (block: string) => {
+    const parsed = parseSseBlock(block);
+    if (!parsed) {
+      return;
+    }
+
+    const payload = JSON.parse(parsed.data) as Record<string, unknown>;
+    switch (parsed.event) {
+      case "conversation":
+        handlers.onConversation?.(payload as unknown as ChatStreamConversationEvent);
+        break;
+      case "stage":
+        handlers.onStage?.(payload as unknown as ChatStreamStageEvent);
+        break;
+      case "answer_start":
+        handlers.onAnswerStart?.(payload as unknown as ChatStreamConversationEvent);
+        break;
+      case "answer_delta":
+        handlers.onAnswerDelta?.(String(payload.delta || ""));
+        break;
+      case "complete":
+        finalResponse = payload as unknown as ChatResponse;
+        handlers.onComplete?.(finalResponse);
+        break;
+      case "error":
+        streamError = String(payload.message || "Streaming chat failed.");
+        break;
+      default:
+        break;
+    }
+  };
+
+  while (true) {
+    const { done, value } = await reader.read();
+    if (done) {
+      break;
+    }
+    buffer += decoder.decode(value, { stream: true }).replace(/\r\n/g, "\n");
+
+    while (true) {
+      const delimiterIndex = buffer.indexOf("\n\n");
+      if (delimiterIndex < 0) {
+        break;
+      }
+      const block = buffer.slice(0, delimiterIndex);
+      buffer = buffer.slice(delimiterIndex + 2);
+      handleBlock(block);
+    }
+  }
+
+  buffer += decoder.decode();
+  if (buffer.trim()) {
+    handleBlock(buffer);
+  }
+
+  if (streamError) {
+    throw new Error(streamError);
+  }
+  if (!finalResponse) {
+    throw new Error("Chat stream ended before the final response arrived.");
+  }
+
+  return finalResponse;
 }

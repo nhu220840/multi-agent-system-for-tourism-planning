@@ -178,6 +178,8 @@ def _llm_recommendations(
     premium_pool: list[dict[str, Any]],
 ) -> list[dict[str, Any]]:
     settings = get_settings()
+    if not bool(settings.stay_recommendation_llm_enabled):
+        return []
     openrouter_key = (settings.openrouter_api_key or "").strip()
     if not openrouter_key:
         return []

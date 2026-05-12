@@ -40,6 +40,7 @@ class Settings(BaseSettings):
     openrouter_model: str = "openai/gpt-oss-120b:free"
     openrouter_reasoning_enabled: bool = True
     openrouter_request_timeout_s: int = 20
+    stay_recommendation_llm_enabled: bool = False
     openweather_api_key: str = ""
     openweather_base_url: str = "https://api.openweathermap.org"
     trackasia_api_key: str = ""

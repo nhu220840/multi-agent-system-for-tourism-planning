@@ -333,25 +333,24 @@ def _format_stay_lines(
     stay_recommendations: list[dict[str, Any]] | None,
     fallback_lines: list[str],
 ) -> list[str]:
-    if stay_recommendations:
-        out: list[str] = []
-        for item in stay_recommendations[:2]:
-            segment = str(item.get("segment") or "").strip()
-            name = str(item.get("name") or "").strip()
-            price_note = str(item.get("price_note") or "").strip()
-            address = normalize_address_text(str(item.get("address") or ""))
-            why_fit = str(item.get("why_fit") or "").strip()
-            if not segment or not name:
-                continue
-            out.append(f"• {segment}: {name}")
-            if price_note:
-                out.append(f"   – Giá tham khảo: {price_note}")
-            if address:
-                out.append(f"   – Địa chỉ: {address}")
-            if why_fit:
-                out.append(f"   – Phù hợp vì: {why_fit}")
+    out = _planned_stay_lines(recommended_hotel=recommended_hotel, stay_plan=stay_plan)
+    if out and stay_recommendations:
+        out.extend(_alternate_stay_lines(stay_recommendations, used_names=_stay_names_from_lines(out)))
+    if out:
         return out
 
+    alternate_only = _alternate_stay_lines(stay_recommendations or [], used_names=set())
+    if alternate_only:
+        return alternate_only
+
+    return fallback_lines[:4]
+
+
+def _planned_stay_lines(
+    *,
+    recommended_hotel: dict[str, Any] | None,
+    stay_plan: dict[str, Any] | None,
+) -> list[str]:
     if isinstance(recommended_hotel, dict) and recommended_hotel:
         if recommended_hotel.get("type") == "multi_city_stay":
             out: list[str] = []
@@ -361,8 +360,8 @@ def _format_stay_lines(
                 city_label = str(segment.get("city_label") or segment.get("city_key") or "").strip()
                 days = segment.get("days") or []
                 day_label = _days_compact_label(days)
-                address = str(hotel.get("address") or "").strip()
-                line = f"• {day_label}: nghỉ tại {hotel_name}"
+                address = normalize_address_text(str(hotel.get("address") or ""))
+                line = f"• Lịch trình sử dụng: {day_label} nghỉ tại {hotel_name}"
                 if city_label:
                     line += f" ({city_label})"
                 out.append(line)
@@ -372,7 +371,7 @@ def _format_stay_lines(
                 return out
         name = str(recommended_hotel.get("name") or "").strip()
         if name:
-            out = [f"• Khách sạn gợi ý chính: {name}"]
+            out = [f"• Khách sạn dùng trong lịch trình: {name}"]
             address = normalize_address_text(str(recommended_hotel.get("address") or ""))
             if address:
                 out.append(f"   – Địa chỉ: {address}")
@@ -386,14 +385,51 @@ def _format_stay_lines(
             if not hotel_name:
                 continue
             day_label = str(segment.get("days_label") or _days_compact_label(segment.get("days") or [])).strip()
-            out.append(f"• {day_label}: {hotel_name}")
-            address = str(hotel.get("address") or "").strip()
+            out.append(f"• Lịch trình sử dụng: {day_label} nghỉ tại {hotel_name}")
+            address = normalize_address_text(str(hotel.get("address") or ""))
             if address:
                 out.append(f"   – Địa chỉ: {address}")
         if out:
             return out
 
-    return fallback_lines[:4]
+    return []
+
+
+def _alternate_stay_lines(
+    stay_recommendations: list[dict[str, Any]],
+    *,
+    used_names: set[str],
+) -> list[str]:
+    out: list[str] = []
+    for item in stay_recommendations[:2]:
+        segment = str(item.get("segment") or "").strip()
+        name = str(item.get("name") or "").strip()
+        price_note = str(item.get("price_note") or "").strip()
+        address = normalize_address_text(str(item.get("address") or ""))
+        why_fit = str(item.get("why_fit") or "").strip()
+        folded_name = name.casefold()
+        if not segment or not name or folded_name in used_names:
+            continue
+        out.append(f"• Tham khảo thêm - {segment}: {name}")
+        if price_note:
+            out.append(f"   – Giá tham khảo: {price_note}")
+        if address:
+            out.append(f"   – Địa chỉ: {address}")
+        if why_fit:
+            out.append(f"   – Phù hợp vì: {why_fit}")
+    return out
+
+
+def _stay_names_from_lines(lines: list[str]) -> set[str]:
+    names: set[str] = set()
+    for line in lines:
+        if "nghỉ tại " in line:
+            names.add(line.split("nghỉ tại ", 1)[1].split(" (", 1)[0].strip().casefold())
+        elif ":" in line:
+            prefix, remainder = line.split(":", 1)
+            if "khách sạn dùng trong lịch trình" in prefix.casefold():
+                names.add(remainder.strip().casefold())
+    return {name for name in names if name}
 
 
 def _format_transport_lines(transport: list[str]) -> list[str]:

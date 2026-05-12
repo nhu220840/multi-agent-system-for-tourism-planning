@@ -13,7 +13,7 @@ import {
   getConversation,
   initSession,
   listConversations,
-  sendChat,
+  sendChatStream,
 } from "@/services/api";
 
 type DraftMessage = {
@@ -26,6 +26,7 @@ type DraftMessage = {
 
 type AssistantMessageMetadata = Partial<ChatResponse> & {
   collected_info?: Record<string, unknown> | null;
+  missing_fields?: string[] | null;
   recommended_hotel?: Record<string, unknown> | null;
   route_plan?: Record<string, unknown>[] | null;
 };
@@ -50,6 +51,13 @@ type StayRecommendation = {
   mapUrl: string | null;
 };
 
+type PlannedStay = {
+  segment: string;
+  name: string;
+  address: string;
+  mapUrl: string | null;
+};
+
 type RouteLeg = {
   dayNumber: number | null;
   sequence: number;
@@ -69,8 +77,7 @@ type RouteLeg = {
 type PlannerSnapshot = {
   destination: string;
   daysLabel: string;
-  hotelName: string;
-  hotelMapUrl: string | null;
+  plannedStays: PlannedStay[];
   stayRecommendations: StayRecommendation[];
   routeLegs: RouteLeg[];
   followUp: string | null;
@@ -372,12 +379,125 @@ function toFriendlySubmitError(error: unknown): string {
   return "Không thể kết nối tới backend. Vui lòng thử lại.";
 }
 
+function statusForStreamStage(stage: string, status: string, needsReplan = false): string {
+  if (stage === "intake") {
+    return status === "completed" ? "Đã kiểm tra xong thông tin đầu vào" : "Đang kiểm tra thông tin đầu vào...";
+  }
+  if (stage === "planning") {
+    return needsReplan ? "Đang điều chỉnh lại lịch trình..." : "Đang lên lịch trình...";
+  }
+  if (stage === "validator") {
+    return needsReplan
+      ? "Validator yêu cầu lập lại kế hoạch..."
+      : status === "completed"
+        ? "Đã rà soát xong lịch trình"
+        : "Đang rà soát lịch trình...";
+  }
+  if (stage === "response") {
+    return status === "completed" ? "Đã soạn xong phản hồi" : "Đang soạn phản hồi...";
+  }
+  return "Đang xử lý yêu cầu...";
+}
+
 function truncateMiddle(value: string, maxLength = 48): string {
   if (value.length <= maxLength) {
     return value;
   }
   const sideLength = Math.max(10, Math.floor((maxLength - 3) / 2));
   return `${value.slice(0, sideLength)}...${value.slice(-sideLength)}`;
+}
+
+function appendAssistantDelta(messages: DraftMessage[], messageId: string, delta: string): DraftMessage[] {
+  let found = false;
+  const updated = messages.map((message) => {
+    if (message.id !== messageId) {
+      return message;
+    }
+    found = true;
+    return {
+      ...message,
+      content: `${message.content}${delta}`,
+    };
+  });
+
+  if (found) {
+    return updated;
+  }
+
+  return [...messages, { id: messageId, role: "assistant", content: delta, pending: true }];
+}
+
+function finalizeAssistantMessage(messages: DraftMessage[], messageId: string, response: ChatResponse): DraftMessage[] {
+  let found = false;
+  const metadata = response as unknown as Record<string, unknown>;
+  const updated = messages.map((message) => {
+    if (message.id !== messageId) {
+      return message;
+    }
+    found = true;
+    return {
+      ...message,
+      content: response.answer,
+      metadata,
+      pending: false,
+    };
+  });
+
+  if (found) {
+    return updated;
+  }
+
+  return [
+    ...messages,
+    {
+      id: messageId,
+      role: "assistant",
+      content: response.answer,
+      metadata,
+      pending: false,
+    },
+  ];
+}
+
+function replaceAssistantContent(messages: DraftMessage[], messageId: string, content: string): DraftMessage[] {
+  let found = false;
+  const updated = messages.map((message) => {
+    if (message.id !== messageId) {
+      return message;
+    }
+    found = true;
+    return {
+      ...message,
+      content,
+    };
+  });
+
+  if (found) {
+    return updated;
+  }
+
+  return [...messages, { id: messageId, role: "assistant", content, pending: true }];
+}
+
+function progressCopyForStage(stage: string, status: string, needsReplan = false): string | null {
+  if (status !== "started") {
+    return null;
+  }
+  if (stage === "intake") {
+    return "Mình đang đọc yêu cầu và kiểm tra xem đã đủ thông tin để lập kế hoạch chưa...\n";
+  }
+  if (stage === "planning") {
+    return needsReplan
+      ? "Mình đang dựng lại lịch trình để khớp hơn với các ràng buộc vừa kiểm tra...\n"
+      : "Mình đang tìm điểm phù hợp, ghép tuyến đường và sắp lịch trình theo từng ngày...\n";
+  }
+  if (stage === "validator") {
+    return "Mình đang rà lại logic lịch trình để tránh bị lệch tuyến hoặc thiếu chặng quan trọng...\n";
+  }
+  if (stage === "response") {
+    return "Mình đang viết lại câu trả lời theo dạng dễ đọc để bạn dùng ngay...\n";
+  }
+  return null;
 }
 
 function linkLabelForLine(url: string, line: string, index: number): string {
@@ -744,33 +864,59 @@ function parsePlanDays(planText: string): DaySummary[] {
   return days;
 }
 
-function extractHotelInfo(metadata: AssistantMessageMetadata): {
-  hotelName: string;
-  hotelMapUrl: string | null;
-} {
+function extractPlannedStays(metadata: AssistantMessageMetadata): PlannedStay[] {
   const rawHotel = metadata.recommended_hotel;
   if (!rawHotel || typeof rawHotel !== "object") {
-    return { hotelName: "", hotelMapUrl: null };
+    return [];
   }
 
   const hotelRecord = rawHotel as Record<string, unknown>;
-  let hotel = hotelRecord;
-
   if (Array.isArray(hotelRecord.segments) && hotelRecord.segments.length > 0) {
-    const firstSegment = hotelRecord.segments[0];
-    if (firstSegment && typeof firstSegment === "object") {
-      const segmentRecord = firstSegment as Record<string, unknown>;
-      if (segmentRecord.hotel && typeof segmentRecord.hotel === "object") {
-        hotel = segmentRecord.hotel as Record<string, unknown>;
-      }
-    }
+    return hotelRecord.segments
+      .map((segment) => {
+        if (!segment || typeof segment !== "object") {
+          return null;
+        }
+        const segmentRecord = segment as Record<string, unknown>;
+        const hotel =
+          segmentRecord.hotel && typeof segmentRecord.hotel === "object"
+            ? (segmentRecord.hotel as Record<string, unknown>)
+            : null;
+        const name = readString(hotel?.name);
+        if (!name) {
+          return null;
+        }
+        return {
+          segment:
+            readString(segmentRecord.days_label) ||
+            readString(segmentRecord.city_label) ||
+            readString(segmentRecord.city_key) ||
+            "Lịch trình",
+          name,
+          address: readString(hotel?.address),
+          mapUrl: readString(hotel?.map_place_uri) || readString(hotel?.google_maps_uri) || readString(hotel?.map_url) || null,
+        } satisfies PlannedStay;
+      })
+      .filter((item): item is PlannedStay => Boolean(item));
   }
 
-  return {
-    hotelName: readString(hotel.name),
-    hotelMapUrl:
-      readString(hotel.map_place_uri) || readString(hotel.google_maps_uri) || readString(hotel.map_url) || null,
-  };
+  const hotelName = readString(hotelRecord.name);
+  if (!hotelName) {
+    return [];
+  }
+
+  return [
+    {
+      segment: "Lịch trình",
+      name: hotelName,
+      address: readString(hotelRecord.address),
+      mapUrl:
+        readString(hotelRecord.map_place_uri) ||
+        readString(hotelRecord.google_maps_uri) ||
+        readString(hotelRecord.map_url) ||
+        null,
+    },
+  ];
 }
 
 function extractStayRecommendations(metadata: AssistantMessageMetadata): StayRecommendation[] {
@@ -800,6 +946,19 @@ function extractStayRecommendations(metadata: AssistantMessageMetadata): StayRec
       } satisfies StayRecommendation;
     })
     .filter((item): item is StayRecommendation => Boolean(item));
+}
+
+function dedupeAlternateStayRecommendations(
+  plannedStays: PlannedStay[],
+  stayRecommendations: StayRecommendation[],
+): StayRecommendation[] {
+  const plannedNames = new Set(
+    plannedStays
+      .map((stay) => stay.name.trim().toLowerCase())
+      .filter(Boolean),
+  );
+
+  return stayRecommendations.filter((stay) => !plannedNames.has(stay.name.trim().toLowerCase()));
 }
 
 function formatDistanceLabel(value: unknown): string {
@@ -947,8 +1106,8 @@ function buildPlannerSnapshot(message: DraftMessage | null): PlannerSnapshot | n
       : {};
   const planText = readString(metadata.plan) || message.content;
   const daySummaries = parsePlanDays(planText);
-  const hotelInfo = extractHotelInfo(metadata);
-  const stayRecommendations = extractStayRecommendations(metadata);
+  const plannedStays = extractPlannedStays(metadata);
+  const stayRecommendations = dedupeAlternateStayRecommendations(plannedStays, extractStayRecommendations(metadata));
   const routeLegs = extractRouteLegs(metadata);
   const followUp = Array.isArray(metadata.follow_up_questions)
     ? metadata.follow_up_questions.find((item) => typeof item === "string" && item.trim()) || null
@@ -959,8 +1118,7 @@ function buildPlannerSnapshot(message: DraftMessage | null): PlannerSnapshot | n
       readString(collectedInfo.destination) || extractDestinationFromAnswer(message.content) || "Chuyến đi hiện tại",
     ),
     daysLabel: formatDaysLabel(collectedInfo.days, daySummaries.length),
-    hotelName: hotelInfo.hotelName,
-    hotelMapUrl: hotelInfo.hotelMapUrl,
+    plannedStays,
     stayRecommendations,
     routeLegs,
     followUp,
@@ -1060,9 +1218,30 @@ function SummaryPanel({
         </p>
       </div>
 
+      {snapshot.plannedStays.length > 0 ? (
+        <div className="summary-card">
+          <span className="summary-card-label">Lưu trú trong lịch trình</span>
+          <div className="summary-stays">
+            {snapshot.plannedStays.map((stay) => (
+              <div key={`${stay.segment}-${stay.name}`} className="summary-stay-item">
+                <strong>
+                  {stay.segment}: {stay.name}
+                </strong>
+                {stay.address ? <p>Địa chỉ: {stay.address}</p> : null}
+                {stay.mapUrl ? (
+                  <a className="summary-link" href={stay.mapUrl} target="_blank" rel="noreferrer">
+                    Mở map khách sạn
+                  </a>
+                ) : null}
+              </div>
+            ))}
+          </div>
+        </div>
+      ) : null}
+
       {snapshot.stayRecommendations.length > 0 ? (
         <div className="summary-card">
-          <span className="summary-card-label">Lưu trú</span>
+          <span className="summary-card-label">Khách sạn tham khảo thêm</span>
           <div className="summary-stays">
             {snapshot.stayRecommendations.slice(0, 2).map((stay) => (
               <div key={`${stay.segment}-${stay.name}`} className="summary-stay-item">
@@ -1080,16 +1259,6 @@ function SummaryPanel({
               </div>
             ))}
           </div>
-        </div>
-      ) : snapshot.hotelName ? (
-        <div className="summary-card">
-          <span className="summary-card-label">Lưu trú</span>
-          <strong>{snapshot.hotelName}</strong>
-          {snapshot.hotelMapUrl ? (
-            <a className="summary-link" href={snapshot.hotelMapUrl} target="_blank" rel="noreferrer">
-              Mở map khách sạn
-            </a>
-          ) : null}
         </div>
       ) : null}
 
@@ -1168,6 +1337,7 @@ export function ChatShell() {
   const [conversationMutationPending, setConversationMutationPending] = useState(false);
   const [clockMs, setClockMs] = useState(() => Date.now());
   const activeConversationKeyRef = useRef<string | null>(null);
+  const messageListRef = useRef<HTMLDivElement | null>(null);
 
   useEffect(() => {
     activeConversationKeyRef.current = activeConversationKey;
@@ -1189,6 +1359,14 @@ export function ChatShell() {
     activeConversationState.pendingStartedAt != null
       ? Math.max(0, clockMs - activeConversationState.pendingStartedAt)
       : 0;
+
+  useEffect(() => {
+    const element = messageListRef.current;
+    if (!element) {
+      return;
+    }
+    element.scrollTop = element.scrollHeight;
+  }, [messages]);
 
   useEffect(() => {
     if (!hasPendingConversations) {
@@ -1456,11 +1634,12 @@ export function ChatShell() {
       return;
     }
     const pendingMode = inferPendingMode(activeState, content);
-    const pendingAssistantText = pendingMode === "planning" ? "Thinking..." : "Đang kiểm tra thông tin...";
+    const pendingAssistantText = "";
 
     const optimisticId = `draft-${Date.now()}`;
+    const assistantMessageId = `${optimisticId}-assistant`;
     setError(null);
-    setStatus(pendingMode === "planning" ? "FastAPI is planning your trip..." : "FastAPI is collecting trip details...");
+    setStatus(pendingMode === "planning" ? "Đang lên lịch trình..." : "Đang kiểm tra thông tin đầu vào...");
     setDraft("");
     setConversationStates((current) => ({
       ...current,
@@ -1470,7 +1649,7 @@ export function ChatShell() {
         messages: [
           ...((current[conversationKey]?.messages || activeState.messages) ?? []),
           { id: optimisticId, role: "user", content },
-          { id: `${optimisticId}-assistant`, role: "assistant", content: pendingAssistantText, pending: true },
+          { id: assistantMessageId, role: "assistant", content: pendingAssistantText, pending: true },
         ],
         followUps: [],
         trace: [],
@@ -1486,59 +1665,119 @@ export function ChatShell() {
 
     (async () => {
       try {
-        const response = await sendChat(content, requestConversationId || undefined);
-        const resolvedConversationId = response.conversation_id || requestConversationId || null;
+        let resolvedConversationId = requestConversationId || null;
+        const response = await sendChatStream(content, requestConversationId || undefined, {
+          onConversation: (event) => {
+            resolvedConversationId = event.conversation_id || resolvedConversationId;
+            setConversationStates((current) => ({
+              ...current,
+              [conversationKey]: {
+                ...(current[conversationKey] ?? createConversationViewState(resolvedConversationId)),
+                ...(current[conversationKey] ?? {}),
+                conversationId: resolvedConversationId,
+              },
+            }));
+          },
+          onStage: (event) => {
+            const progressText = progressCopyForStage(event.stage, event.status, Boolean(event.needs_replan));
+            setConversationStates((current) => ({
+              ...current,
+              [conversationKey]: {
+                ...(current[conversationKey] ?? createConversationViewState(resolvedConversationId)),
+                conversationId: resolvedConversationId,
+                messages: progressText
+                  ? appendAssistantDelta(current[conversationKey]?.messages || [], assistantMessageId, progressText)
+                  : (current[conversationKey]?.messages || []),
+                followUps: event.follow_up_questions || [],
+                trace: normalizeTrace(event.trace),
+                debugSteps: current[conversationKey]?.debugSteps || [],
+                conversationStage: event.conversation_stage || current[conversationKey]?.conversationStage || null,
+                pendingMode: current[conversationKey]?.pendingMode || pendingMode,
+                pendingStartedAt: current[conversationKey]?.pendingStartedAt ?? Date.now(),
+              },
+            }));
+            if (activeConversationKeyRef.current === conversationKey || activeConversationKeyRef.current === resolvedConversationId) {
+              setStatus(statusForStreamStage(event.stage, event.status, Boolean(event.needs_replan)));
+            }
+          },
+          onAnswerStart: () => {
+            setConversationStates((current) => ({
+              ...current,
+              [conversationKey]: {
+                ...(current[conversationKey] ?? createConversationViewState(resolvedConversationId)),
+                conversationId: resolvedConversationId,
+                messages: replaceAssistantContent(current[conversationKey]?.messages || [], assistantMessageId, ""),
+                followUps: current[conversationKey]?.followUps || [],
+                trace: current[conversationKey]?.trace || [],
+                debugSteps: current[conversationKey]?.debugSteps || [],
+                conversationStage: current[conversationKey]?.conversationStage || null,
+                pendingMode: current[conversationKey]?.pendingMode || pendingMode,
+                pendingStartedAt: current[conversationKey]?.pendingStartedAt ?? Date.now(),
+              },
+            }));
+            if (activeConversationKeyRef.current === conversationKey || activeConversationKeyRef.current === resolvedConversationId) {
+              setStatus("Đang hiển thị câu trả lời...");
+            }
+          },
+          onAnswerDelta: (delta) => {
+            if (!delta) {
+              return;
+            }
+            setConversationStates((current) => ({
+              ...current,
+              [conversationKey]: {
+                ...(current[conversationKey] ?? createConversationViewState(resolvedConversationId)),
+                conversationId: resolvedConversationId,
+                messages: appendAssistantDelta(current[conversationKey]?.messages || [], assistantMessageId, delta),
+                followUps: current[conversationKey]?.followUps || [],
+                trace: current[conversationKey]?.trace || [],
+                debugSteps: current[conversationKey]?.debugSteps || [],
+                conversationStage: current[conversationKey]?.conversationStage || null,
+                pendingMode: current[conversationKey]?.pendingMode || pendingMode,
+                pendingStartedAt: current[conversationKey]?.pendingStartedAt ?? Date.now(),
+              },
+            }));
+          },
+        });
+        resolvedConversationId = response.conversation_id || resolvedConversationId;
 
         await refreshServerConversations();
 
-        if (resolvedConversationId) {
-          const detail = await getConversation(resolvedConversationId);
-          const signals = extractConversationSignals(detail);
-          setConversationStates((current) => {
-            const nextKey = resolvedConversationId;
-            const nextState: ConversationViewState = {
-              conversationId: detail.id,
-              messages: toDraftMessages(detail),
-              followUps: signals.followUps,
-              trace: signals.trace,
-              debugSteps: signals.debugSteps,
-              conversationStage: signals.conversationStage,
-              pendingMode: null,
-              pendingStartedAt: null,
-            };
-            if (conversationKey === nextKey) {
-              return {
-                ...current,
-                [nextKey]: nextState,
-              };
-            }
-            const updated = {
+        setConversationStates((current) => {
+          const currentState = current[conversationKey] ?? createConversationViewState(resolvedConversationId);
+          const nextState: ConversationViewState = {
+            conversationId: resolvedConversationId,
+            messages: finalizeAssistantMessage(currentState.messages, assistantMessageId, response),
+            followUps: response.follow_up_questions || [],
+            trace: normalizeTrace(response.trace),
+            debugSteps: response.debug_steps || [],
+            conversationStage: response.conversation_stage || null,
+            pendingMode: null,
+            pendingStartedAt: null,
+          };
+
+          if (!resolvedConversationId || resolvedConversationId === conversationKey) {
+            return {
               ...current,
-              [nextKey]: nextState,
+              [conversationKey]: nextState,
             };
-            delete updated[conversationKey];
-            return updated;
-          });
+          }
+
+          const updated = {
+            ...current,
+            [resolvedConversationId]: nextState,
+          };
+          delete updated[conversationKey];
+          return updated;
+        });
+
+        if (resolvedConversationId && resolvedConversationId !== conversationKey) {
           setDraftConversations((current) => current.filter((item) => item.key !== conversationKey));
           setActiveConversationKey((current) => (current === conversationKey ? resolvedConversationId : current));
-        } else {
-          setConversationStates((current) => ({
-            ...current,
-            [conversationKey]: {
-              ...(current[conversationKey] ?? createConversationViewState()),
-              pendingStartedAt: null,
-              followUps: response.follow_up_questions || [],
-              trace: normalizeTrace(response.trace),
-              debugSteps: response.debug_steps || [],
-              conversationStage: response.conversation_stage || null,
-              pendingMode: null,
-              conversationId: requestConversationId,
-            },
-          }));
         }
 
         if (activeConversationKeyRef.current === conversationKey || activeConversationKeyRef.current === resolvedConversationId) {
-          setStatus(response.conversation_stage === "intake" ? "Need a little more info" : "Plan ready");
+          setStatus(response.conversation_stage === "intake" ? "Cần thêm một chút thông tin" : "Kế hoạch đã sẵn sàng");
         }
       } catch (submitError) {
         setConversationStates((current) => ({
@@ -1547,7 +1786,7 @@ export function ChatShell() {
             ...(current[conversationKey] ?? createConversationViewState(requestConversationId)),
             conversationId: requestConversationId,
             messages: (current[conversationKey]?.messages || []).map((message) =>
-              message.id === `${optimisticId}-assistant`
+              message.id === assistantMessageId
                 ? {
                     ...message,
                     content: toFriendlySubmitError(submitError),
@@ -1668,7 +1907,7 @@ export function ChatShell() {
 
           <div className="chat-body">
             <div className="chat-main">
-              <div className="message-list">
+              <div ref={messageListRef} className="message-list">
                 {canShowEmptyState ? (
                   <div className="empty-chat">
                     <article className="message-bubble assistant">
